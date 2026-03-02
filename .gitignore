@@ -1,0 +1,19 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# SQLite database files (jangan push ke Git — pakai Railway Volume)
+*.db
+*.db-shm
+*.db-wal
+
+# Windows reserved device name (tidak bisa dihapus)
+nul
+
+# Claude internal files
+.claude/
