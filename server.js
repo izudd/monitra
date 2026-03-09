@@ -30,9 +30,9 @@ process.on("unhandledRejection", (reason) => {
 });
 writeLog("Starting MONITRA server...");
 writeLog(`NODE_ENV=${process.env.NODE_ENV}, DB_PATH=${process.env.DB_PATH || "(default)"}, __dirname=${__dirname}`);
-// Initialize Database
+// Initialize Database (sql.js init is async)
 try {
-    initDb();
+    await initDb();
     writeLog("Database initialized OK");
 }
 catch (err) {

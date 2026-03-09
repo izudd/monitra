@@ -1,18 +1,99 @@
-import Database from 'better-sqlite3';
+import initSqlJs from 'sql.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import bcrypt from 'bcryptjs';
-// Di Railway: set DB_PATH=/data/audit_system.db (persistent volume)
-// Di lokal: default ke audit_system.db di root project
-const db = new Database(process.env.DB_PATH || 'audit_system.db');
-db.pragma('foreign_keys = ON');
-db.pragma('journal_mode = WAL');
-export function initDb() {
-    db.exec(`
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const dbPath = process.env.DB_PATH || path.join(process.cwd(), 'audit_system.db');
+let _db = null;
+// ─── PERSISTENCE ─────────────────────────────────────────────────────────────
+function saveDb() {
+    if (!_db)
+        return;
+    const data = _db.export();
+    fs.writeFileSync(dbPath, Buffer.from(data));
+}
+function prepare(sql) {
+    return {
+        run(...args) {
+            if (!_db)
+                throw new Error('Database not initialized');
+            const params = args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
+            _db.run(sql, params.length ? params : undefined);
+            saveDb();
+            const changes = _db.getRowsModified();
+            const r = _db.exec('SELECT last_insert_rowid() as id');
+            const lastInsertRowid = r.length && r[0].values.length
+                ? Number(r[0].values[0][0]) : 0;
+            return { changes, lastInsertRowid };
+        },
+        get(...args) {
+            if (!_db)
+                throw new Error('Database not initialized');
+            const params = args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
+            const stmt = _db.prepare(sql);
+            try {
+                if (params.length)
+                    stmt.bind(params);
+                return stmt.step() ? stmt.getAsObject() : undefined;
+            }
+            finally {
+                stmt.free();
+            }
+        },
+        all(...args) {
+            if (!_db)
+                throw new Error('Database not initialized');
+            const params = args.length === 1 && Array.isArray(args[0]) ? args[0] : args;
+            const stmt = _db.prepare(sql);
+            try {
+                if (params.length)
+                    stmt.bind(params);
+                const rows = [];
+                while (stmt.step())
+                    rows.push(stmt.getAsObject());
+                return rows;
+            }
+            finally {
+                stmt.free();
+            }
+        },
+    };
+}
+function dbExec(sql) {
+    if (!_db)
+        throw new Error('Database not initialized');
+    _db.exec(sql);
+    saveDb();
+}
+const db = {
+    prepare,
+    exec: dbExec,
+    pragma: (_) => undefined, // no-op: pragmas handled via PRAGMA sql in initDb
+};
+export { db };
+export default db;
+// ─── INIT ────────────────────────────────────────────────────────────────────
+export async function initDb() {
+    const SQL = await initSqlJs({
+        locateFile: (filename) => path.join(process.cwd(), 'node_modules', 'sql.js', 'dist', filename),
+    });
+    if (fs.existsSync(dbPath)) {
+        const buf = fs.readFileSync(dbPath);
+        _db = new SQL.Database(buf);
+    }
+    else {
+        _db = new SQL.Database();
+    }
+    _db.run('PRAGMA foreign_keys = ON');
+    _db.exec(`
     CREATE TABLE IF NOT EXISTS roles (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT UNIQUE NOT NULL
     )
   `);
-    db.exec(`
+    _db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT UNIQUE NOT NULL,
@@ -23,44 +104,37 @@ export function initDb() {
       FOREIGN KEY (role_id) REFERENCES roles(id)
     )
   `);
-    // Migration: tambah kolom archived_at di pts (safe untuk DB lama)
+    // Migrations — safe for existing DB
     try {
-        db.exec('ALTER TABLE pts ADD COLUMN archived_at TEXT');
+        _db.exec('ALTER TABLE pts ADD COLUMN archived_at TEXT');
     }
-    catch { /* sudah ada */ }
-    // Migration: tambah kolom is_active kalau belum ada (safe untuk DB lama)
+    catch { /* exists */ }
     try {
-        db.exec('ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1');
-        db.exec('UPDATE users SET is_active = 1 WHERE is_active IS NULL');
+        _db.exec('ALTER TABLE users ADD COLUMN is_active INTEGER DEFAULT 1');
+        _db.exec('UPDATE users SET is_active = 1 WHERE is_active IS NULL');
     }
-    catch { /* kolom sudah ada, skip */ }
-    // Migration: email + email_reminder untuk notifikasi pengingat
+    catch { /* exists */ }
     try {
-        db.exec("ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''");
+        _db.exec("ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''");
     }
-    catch { /* sudah ada */ }
+    catch { /* exists */ }
     try {
-        db.exec('ALTER TABLE users ADD COLUMN email_reminder INTEGER DEFAULT 1');
+        _db.exec('ALTER TABLE users ADD COLUMN email_reminder INTEGER DEFAULT 1');
     }
-    catch { /* sudah ada */ }
-    // Migration: kode_unik — kode login unik 6 karakter untuk Auditor
-    // CATATAN: SQLite tidak support UNIQUE constraint di ALTER TABLE ADD COLUMN,
-    // jadi kolom ditambah dulu tanpa UNIQUE, lalu UNIQUE index dibuat terpisah.
+    catch { /* exists */ }
     try {
-        db.exec('ALTER TABLE users ADD COLUMN kode_unik TEXT');
+        _db.exec('ALTER TABLE users ADD COLUMN kode_unik TEXT');
     }
-    catch { /* sudah ada */ }
+    catch { /* exists */ }
     try {
-        db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_kode_unik ON users(kode_unik)');
+        _db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_kode_unik ON users(kode_unik)');
     }
-    catch { /* sudah ada */ }
-    // Migration: supervisor_id — assign Auditor ke SPV tertentu
+    catch { /* exists */ }
     try {
-        db.exec('ALTER TABLE users ADD COLUMN supervisor_id INTEGER REFERENCES users(id)');
+        _db.exec('ALTER TABLE users ADD COLUMN supervisor_id INTEGER REFERENCES users(id)');
     }
-    catch { /* sudah ada */ }
-    // SPV / Manager Daily Log — catatan harian bebas, tidak terikat PT
-    db.exec(`
+    catch { /* exists */ }
+    _db.exec(`
     CREATE TABLE IF NOT EXISTS spv_daily_reports (
       id         INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id    INTEGER NOT NULL REFERENCES users(id),
@@ -74,24 +148,7 @@ export function initDb() {
       updated_at TEXT DEFAULT (datetime('now','localtime'))
     )
   `);
-    // Generate kode_unik untuk user yang belum punya (user lama / baru sebelum migrasi)
-    const CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // tanpa 0/O/1/I yang membingungkan
-    function makeKode() {
-        let k = '';
-        for (let i = 0; i < 6; i++)
-            k += CHARS[Math.floor(Math.random() * CHARS.length)];
-        return k;
-    }
-    const usersWithoutKode = db.prepare('SELECT id FROM users WHERE kode_unik IS NULL OR kode_unik = \'\'').all();
-    for (const u of usersWithoutKode) {
-        let kode = makeKode();
-        // pastikan tidak collision
-        while (db.prepare('SELECT id FROM users WHERE kode_unik = ?').get(kode))
-            kode = makeKode();
-        db.prepare('UPDATE users SET kode_unik = ? WHERE id = ?').run(kode, u.id);
-    }
-    // Tabel notifikasi in-app
-    db.exec(`
+    _db.exec(`
     CREATE TABLE IF NOT EXISTS notifications (
       id         INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id    INTEGER NOT NULL,
@@ -103,15 +160,14 @@ export function initDb() {
       FOREIGN KEY (user_id) REFERENCES users(id)
     )
   `);
-    // Tabel konfigurasi sistem (SMTP dsb) — key-value
-    db.exec(`
+    _db.exec(`
     CREATE TABLE IF NOT EXISTS system_config (
       key        TEXT PRIMARY KEY,
       value      TEXT NOT NULL DEFAULT '',
       updated_at TEXT DEFAULT (datetime('now','localtime'))
     )
   `);
-    db.exec(`
+    _db.exec(`
     CREATE TABLE IF NOT EXISTS pts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       nama_pt TEXT NOT NULL,
@@ -122,7 +178,7 @@ export function initDb() {
       status TEXT DEFAULT 'Active'
     )
   `);
-    db.exec(`
+    _db.exec(`
     CREATE TABLE IF NOT EXISTS audit_assignments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       pt_id INTEGER NOT NULL,
@@ -134,7 +190,7 @@ export function initDb() {
       FOREIGN KEY (auditor_id) REFERENCES users(id)
     )
   `);
-    db.exec(`
+    _db.exec(`
     CREATE TABLE IF NOT EXISTS daily_reports (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       assignment_id INTEGER NOT NULL,
@@ -156,7 +212,7 @@ export function initDb() {
       FOREIGN KEY (approved_by) REFERENCES users(id)
     )
   `);
-    db.exec(`
+    _db.exec(`
     CREATE TABLE IF NOT EXISTS visit_logs (
       id               INTEGER PRIMARY KEY AUTOINCREMENT,
       assignment_id    INTEGER NOT NULL,
@@ -178,8 +234,36 @@ export function initDb() {
     )
   `);
     // Seed roles
-    ['Admin', 'Auditor', 'Supervisor', 'Manager'].forEach(name => db.prepare('INSERT OR IGNORE INTO roles (name) VALUES (?)').run(name));
-    // Seed users dengan bcrypt hash
+    ['Admin', 'Auditor', 'Supervisor', 'Manager'].forEach(name => {
+        _db.run('INSERT OR IGNORE INTO roles (name) VALUES (?)', [name]);
+    });
+    // Generate kode_unik for users without one
+    const CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    function makeKode() {
+        let k = '';
+        for (let i = 0; i < 6; i++)
+            k += CHARS[Math.floor(Math.random() * CHARS.length)];
+        return k;
+    }
+    const noKodeStmt = _db.prepare("SELECT id FROM users WHERE kode_unik IS NULL OR kode_unik = ''");
+    const usersWithoutKode = [];
+    while (noKodeStmt.step())
+        usersWithoutKode.push(noKodeStmt.getAsObject());
+    noKodeStmt.free();
+    for (const u of usersWithoutKode) {
+        let kode = makeKode();
+        // ensure no collision
+        let checkStmt = _db.prepare('SELECT id FROM users WHERE kode_unik = ?');
+        checkStmt.bind([kode]);
+        while (checkStmt.step()) {
+            kode = makeKode();
+            checkStmt.reset();
+            checkStmt.bind([kode]);
+        }
+        checkStmt.free();
+        _db.run('UPDATE users SET kode_unik = ? WHERE id = ?', [kode, u.id]);
+    }
+    // Seed default users
     const seedUsers = [
         { username: 'admin', password: 'admin123', full_name: 'System Administrator', role: 'Admin' },
         { username: 'supervisor', password: 'supervisor123', full_name: 'John Supervisor', role: 'Supervisor' },
@@ -188,25 +272,28 @@ export function initDb() {
         { username: 'auditor2', password: 'auditor123', full_name: 'Bob Auditor', role: 'Auditor' },
     ];
     for (const u of seedUsers) {
-        const existing = db.prepare('SELECT id, password FROM users WHERE username = ?').get(u.username);
-        const roleRow = db.prepare('SELECT id FROM roles WHERE name = ?').get(u.role);
+        const existStmt = _db.prepare('SELECT id, password FROM users WHERE username = ?');
+        existStmt.bind([u.username]);
+        const existing = existStmt.step() ? existStmt.getAsObject() : undefined;
+        existStmt.free();
+        const roleStmt = _db.prepare('SELECT id FROM roles WHERE name = ?');
+        roleStmt.bind([u.role]);
+        const roleRow = roleStmt.step() ? roleStmt.getAsObject() : undefined;
+        roleStmt.free();
         if (!roleRow)
             continue;
         if (!existing) {
-            // User baru — hash password, set is_active = 1
             const hashed = bcrypt.hashSync(u.password, 10);
-            db.prepare('INSERT INTO users (username, password, full_name, role_id, is_active) VALUES (?, ?, ?, ?, 1)')
-                .run(u.username, hashed, u.full_name, roleRow.id);
+            _db.run('INSERT INTO users (username, password, full_name, role_id, is_active) VALUES (?, ?, ?, ?, 1)', [u.username, hashed, u.full_name, roleRow.id]);
         }
         else {
-            // Pastikan semua seed user selalu aktif
-            db.prepare('UPDATE users SET is_active = 1 WHERE id = ?').run(existing.id);
-        }
-        if (existing && !existing.password.startsWith('$2')) {
-            // User lama dengan plain text — upgrade ke bcrypt
-            const hashed = bcrypt.hashSync(u.password, 10);
-            db.prepare('UPDATE users SET password = ? WHERE id = ?').run(hashed, existing.id);
+            _db.run('UPDATE users SET is_active = 1 WHERE id = ?', [existing.id]);
+            if (existing.password && !String(existing.password).startsWith('$2')) {
+                const hashed = bcrypt.hashSync(u.password, 10);
+                _db.run('UPDATE users SET password = ? WHERE id = ?', [hashed, existing.id]);
+            }
         }
     }
+    // Persist to disk once after all setup
+    saveDb();
 }
-export default db;
