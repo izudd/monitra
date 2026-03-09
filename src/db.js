@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs';
 // ─── CONNECTION POOL ──────────────────────────────────────────────────────────
 // Gunakan Unix socket agar MySQL tidak cek IPv6 (bypass ::1 vs localhost issue)
 const pool = mysql.createPool({
-    socketPath: process.env.DB_SOCKET || '/var/run/mysqld/mysqld.sock',
+    socketPath: process.env.DB_SOCKET || '/var/lib/mysql/mysql.sock',
     database: process.env.DB_NAME || 'u846640655_dbmonit',
     user: process.env.DB_USER || 'u846640655_usermonit',
     password: process.env.DB_PASS || 'fM@0U|^5s|w',
