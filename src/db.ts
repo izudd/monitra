@@ -2,12 +2,12 @@ import mysql from 'mysql2/promise';
 import bcrypt from 'bcryptjs';
 
 // ─── CONNECTION POOL ──────────────────────────────────────────────────────────
+// Gunakan Unix socket agar MySQL tidak cek IPv6 (bypass ::1 vs localhost issue)
 const pool = mysql.createPool({
-  host:     process.env.DB_HOST || '127.0.0.1',
-  port:     Number(process.env.DB_PORT) || 3306,
-  database: process.env.DB_NAME || 'u846640655_dbmonit',
-  user:     process.env.DB_USER || 'u846640655_usermonit',
-  password: process.env.DB_PASS || 'fM@0U|^5s|w',
+  socketPath: process.env.DB_SOCKET || '/var/run/mysqld/mysqld.sock',
+  database:   process.env.DB_NAME   || 'u846640655_dbmonit',
+  user:       process.env.DB_USER   || 'u846640655_usermonit',
+  password:   process.env.DB_PASS   || 'fM@0U|^5s|w',
   waitForConnections: true,
   connectionLimit:    10,
   charset:            'utf8mb4',
