@@ -6,11 +6,11 @@
   "scripts": {
     "dev": "tsx watch server.ts",
     "frontend": "vite",
-    "build": "vite build",
+    "build": "vite build && node_modules/.bin/tsc -p tsconfig.server.json",
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "start": "node server.mjs",
+    "start": "node server.js",
     "postinstall": "npm rebuild better-sqlite3 --build-from-source 2>/dev/null || true"
   },
   "dependencies": {

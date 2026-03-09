@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": ".",
+    "rootDir": ".",
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "declaration": false,
+    "noEmit": false,
+    "strict": false
+  },
+  "include": ["server.ts", "src/db.ts"],
+  "exclude": []
+}
