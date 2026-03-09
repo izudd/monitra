@@ -15,7 +15,7 @@ import {
   Navigation, Footprints, ImageOff, Crosshair, ThumbsUp, ThumbsDown, ZoomIn,
   Archive, RotateCcw, Search, CalendarDays, BadgeCheck,
   Mail, Server, SendHorizontal, TestTube2, BellRing, BellOff, Dot,
-  Copy, RefreshCw
+  Copy, RefreshCw, BookOpen, Trash2, Pencil, NotebookPen
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import jsPDF from 'jspdf';
@@ -958,14 +958,27 @@ const VisitLogs = () => {
     ? { bg: '#ecfdf5', color: '#065f46' }
     : { bg: '#eff6ff', color: '#1e40af' };
 
+  // Untuk SPV: hanya auditor yang di-assign ke SPV ini
+  const isSupervisor = user?.role === 'Supervisor';
+  const myAuditorIds = isSupervisor
+    ? new Set(auditorList.filter((a: any) => a.supervisor_id === user?.id).map((a: any) => a.id))
+    : null;
+
   // filtered list for SPV
   const filtered = visits.filter(v => {
+    // SPV hanya lihat auditor yang assigned ke mereka
+    if (isSupervisor && myAuditorIds && myAuditorIds.size > 0 && !myAuditorIds.has(v.auditor_id)) return false;
     if (fAuditor && String(v.auditor_id) !== fAuditor) return false;
     if (fPT      && String(v.pt_id)      !== fPT)      return false;
     if (fDate    && !(v.timestamp || '').startsWith(fDate)) return false;
     if (fType    && v.type !== fType)                   return false;
     return true;
   });
+
+  // Daftar auditor untuk filter panel (SPV hanya lihat auditornya sendiri)
+  const filteredAuditorList = isSupervisor && myAuditorIds && myAuditorIds.size > 0
+    ? auditorList.filter((a: any) => myAuditorIds.has(a.id))
+    : auditorList;
 
   // today's pending reviews count for SPV
   const pendingCount = visits.filter(v => v.approval_status === 'Pending').length;
@@ -1039,7 +1052,7 @@ const VisitLogs = () => {
         <div style={{ ...card(), padding: '12px 14px', marginBottom: 16, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
           <select value={fAuditor} onChange={e => setFAuditor(e.target.value)} style={{ ...inp, width: 160 }}>
             <option value="">Semua Auditor</option>
-            {auditorList.map((a: any) => <option key={a.id} value={String(a.id)}>{a.full_name}</option>)}
+            {filteredAuditorList.map((a: any) => <option key={a.id} value={String(a.id)}>{a.full_name}</option>)}
           </select>
           <select value={fPT} onChange={e => setFPT(e.target.value)} style={{ ...inp, width: 160 }}>
             <option value="">Semua PT</option>
@@ -3030,6 +3043,1058 @@ const RoleBadge = ({ role }: { role: string }) => {
   );
 };
 
+// ─── REPORT MONITOR (Admin) ──────────────────────────────────────────────────
+const ReportMonitor = () => {
+  const { user: me } = useAuth();
+
+  type ITab = 'manager' | 'spv' | 'auditor';
+  const [tab, setTab]               = useState<ITab>('manager');
+  const [spvLogs, setSpvLogs]       = useState<any[]>([]);
+  const [auditReps, setAuditReps]   = useState<any[]>([]);
+  const [allUsers, setAllUsers]     = useState<any[]>([]);
+  const [loading, setLoading]       = useState(true);
+  const [search, setSearch]         = useState('');
+  const [dateFrom, setDateFrom]     = useState<string>(() => { const d = new Date(); d.setDate(d.getDate() - 6); return d.toISOString().split('T')[0]; });
+  const [dateTo, setDateTo]         = useState<string>(new Date().toISOString().split('T')[0]);
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const [expandedSpv, setExpandedSpv] = useState<string | null>(null);
+  const [expandedAud, setExpandedAud] = useState<number | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [s, a, u] = await Promise.all([
+        apiFetch('/api/spv-reports', me?.id).then(r => r.json()),
+        apiFetch('/api/reports',     me?.id).then(r => r.json()),
+        apiFetch('/api/users',       me?.id).then(r => r.json()),
+      ]);
+      setSpvLogs(Array.isArray(s) ? s : []);
+      setAuditReps(Array.isArray(a) ? a : []);
+      setAllUsers(Array.isArray(u) ? u : []);
+    } catch { /* silent */ }
+    setLoading(false);
+  }, [me?.id]);
+
+  useEffect(() => { load(); }, [load]);
+
+  // ── derived ──
+  const managerLogs    = spvLogs.filter(r => r.author_role === 'Manager');
+  const supervisorLogs = spvLogs.filter(r => r.author_role === 'Supervisor');
+  const auditors       = allUsers.filter(u => u.role === 'Auditor');
+
+  // spv id → name
+  const spvMap: Record<string, string> = {};
+  for (const u of allUsers) if (u.role === 'Supervisor') spvMap[String(u.id)] = u.full_name;
+
+  // auditor_id → reports[]
+  const repsByAud: Record<number, any[]> = {};
+  for (const r of auditReps) {
+    const aid = r.auditor_id;
+    if (!repsByAud[aid]) repsByAud[aid] = [];
+    repsByAud[aid].push(r);
+  }
+
+  // auditors grouped by supervisor_id
+  const audsBySpv: Record<string, any[]> = {};
+  for (const a of auditors) {
+    const key = a.supervisor_id ? String(a.supervisor_id) : 'unassigned';
+    if (!audsBySpv[key]) audsBySpv[key] = [];
+    audsBySpv[key].push(a);
+  }
+
+  const MONS  = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agt','Sep','Okt','Nov','Des'];
+  const DAYS  = ['Min','Sen','Sel','Rab','Kam','Jum','Sab'];
+  const fmtM  = (k: string) => { const [y,m] = k.split('-'); return `${MONS[+m-1]} ${y}`; };
+  const badge = (tgl: string) => { const d = new Date(tgl+'T00:00:00'); return { day: d.getDate(), mon: MONS[d.getMonth()], dow: DAYS[d.getDay()] }; };
+
+  // filter for manager/spv timeline
+  const applyFilter = (list: any[]) => list.filter(l => {
+    const q   = search.toLowerCase();
+    const tgl = l.tanggal || '';
+    const s = !q || [l.author_name, l.judul, l.isi].some(v => v?.toLowerCase().includes(q));
+    const f = !dateFrom || tgl >= dateFrom;
+    const t = !dateTo   || tgl <= dateTo;
+    return s && f && t;
+  });
+
+  // ── shared styles ──
+  const tabBtn = (active: boolean): CSSProperties => ({
+    padding: '9px 20px', borderRadius: 8, border: 'none', cursor: 'pointer', fontFamily: SANS,
+    fontSize: 13, fontWeight: active ? 700 : 500,
+    background: active ? T.blue700 : T.gray100, color: active ? T.white : T.gray600,
+    transition: 'all 0.15s',
+  });
+
+  // ── helpers ──
+  const groupByDate = (list: any[]) => list.reduce((acc: Record<string, any[]>, l) => {
+    const k = l.tanggal || '—'; if (!acc[k]) acc[k] = []; acc[k].push(l); return acc;
+  }, {} as Record<string, any[]>);
+
+  const fmtFullDate = (tgl: string) => {
+    const d = new Date(tgl + 'T00:00:00');
+    return `${DAYS[d.getDay()]}, ${String(d.getDate()).padStart(2,'0')} ${MONS[d.getMonth()]} ${d.getFullYear()}`;
+  };
+
+  // ── Daily feed for Manager / SPV ──
+  const TimelineTab = ({ list, prefix }: { list: any[]; prefix: string }) => {
+    const [expandedMon, setExpandedMon] = useState<Set<string>>(() => new Set([new Date().toISOString().slice(0, 7)]));
+    const toggleMon = (k: string) => setExpandedMon(prev => { const n = new Set(prev); n.has(k) ? n.delete(k) : n.add(k); return n; });
+
+    if (list.length === 0) return (
+      <div style={{ textAlign: 'center', padding: '56px 20px', color: T.gray400 }}>
+        <BookOpen size={36} style={{ marginBottom: 12, opacity: .25 }} />
+        <div style={{ fontSize: 14, fontWeight: 600, color: T.gray600, marginBottom: 4 }}>Belum ada catatan</div>
+        <div style={{ fontSize: 12 }}>Tidak ada data yang sesuai filter</div>
+      </div>
+    );
+
+    const accentCol = prefix === 'mgr' ? '#7c3aed' : T.blue700;
+    const accentBg  = prefix === 'mgr' ? '#f5f3ff' : T.blue50;
+    const accentBdr = prefix === 'mgr' ? '#ddd6fe' : T.blue100;
+
+    // group by month, then by date within each month
+    const byMonth: Record<string, any[]> = list.reduce((acc: Record<string, any[]>, l) => {
+      const k = (l.tanggal || '—').slice(0, 7); if (!acc[k]) acc[k] = []; acc[k].push(l); return acc;
+    }, {} as Record<string, any[]>);
+
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {Object.entries(byMonth).sort(([a], [b]) => b.localeCompare(a)).map(([monKey, monEntries]) => {
+          const isExpMon = expandedMon.has(monKey);
+          const grouped: Record<string, any[]> = groupByDate(monEntries as any[]);
+          return (
+            <div key={monKey} style={{ marginBottom: 20 }}>
+              {/* ── Month header — collapsible ── */}
+              <button onClick={() => toggleMon(monKey)} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, marginBottom: isExpMon ? 12 : 0, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: accentCol, letterSpacing: '0.1em', textTransform: 'uppercase', background: accentBg, border: `1px solid ${accentBdr}`, borderRadius: 20, padding: '3px 12px', display: 'flex', alignItems: 'center', gap: 5 }}>
+                  {isExpMon ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+                  {fmtM(monKey)}
+                </div>
+                <div style={{ flex: 1, height: 1, background: T.gray200 }} />
+                <span style={{ fontSize: 11, color: T.gray400 }}>{monEntries.length} catatan</span>
+              </button>
+
+              {/* ── Date groups (only if month expanded) ── */}
+              {isExpMon && Object.entries(grouped).sort(([a], [b]) => b.localeCompare(a)).map(([tgl, entries]) => (
+                <div key={tgl} style={{ marginBottom: 18 }}>
+                  {/* ── Date header ── */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: T.blue900, borderRadius: 10, padding: '5px 14px' }}>
+                      <CalendarDays size={12} color="rgba(255,255,255,0.7)" />
+                      <span style={{ fontSize: 12, fontWeight: 700, color: T.white, letterSpacing: '.02em' }}>{fmtFullDate(tgl)}</span>
+                    </div>
+                    <div style={{ flex: 1, height: 1, background: T.gray200 }} />
+                    {entries.length > 1 && (
+                      <span style={{ fontSize: 11, color: T.gray400 }}>{entries.length} entri</span>
+                    )}
+                  </div>
+
+                  {/* ── Entries for this date ── */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {entries.map((log: any) => {
+                const key   = `${prefix}-${log.id}`;
+                const isExp = expandedKey === key;
+                const keg   = (log.kegiatan || '').split('\n').map((s: string) => s.trim()).filter(Boolean);
+                const init  = (log.author_name || '?').split(' ').map((w: string) => w[0]).join('').toUpperCase().slice(0, 2);
+
+                return (
+                  <div key={log.id} style={{
+                    background: T.white, borderRadius: 12,
+                    border: `1px solid ${isExp ? accentBdr : T.gray200}`,
+                    boxShadow: isExp ? `0 0 0 2px ${accentBg}` : '0 1px 3px rgba(0,0,0,.04)',
+                    overflow: 'hidden', transition: 'all 0.15s',
+                  }}>
+                    {/* ── Always-visible body ── */}
+                    <div style={{ padding: '14px 16px' }}>
+                      {/* Author row */}
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+                          <div style={{
+                            width: 30, height: 30, borderRadius: 9, flexShrink: 0,
+                            background: `linear-gradient(135deg, ${accentCol}, ${prefix === 'mgr' ? '#a855f7' : T.blue500})`,
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            fontSize: 11, fontWeight: 800, color: T.white,
+                          }}>{init}</div>
+                          <div>
+                            <div style={{ fontSize: 13, fontWeight: 700, color: T.gray900 }}>{log.author_name}</div>
+                            <div style={{ fontSize: 10, color: T.gray400, marginTop: 1 }}>
+                              {log.created_at?.slice(11, 16) ? `Input pukul ${log.created_at.slice(11, 16)}` : '—'}
+                            </div>
+                          </div>
+                        </div>
+                        {(log.kendala || log.rencana) && (
+                          <div style={{ display: 'flex', gap: 5 }}>
+                            {log.kendala && (
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: '#fee2e2', color: T.red, display: 'flex', alignItems: 'center', gap: 3 }}>
+                                <AlertTriangle size={9} /> Kendala
+                              </span>
+                            )}
+                            {log.rencana && (
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: '#dcfce7', color: T.green, display: 'flex', alignItems: 'center', gap: 3 }}>
+                                <CalendarDays size={9} /> Rencana
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Judul */}
+                      <div style={{ fontSize: 15, fontWeight: 700, color: T.gray900, marginBottom: 8, lineHeight: 1.3 }}>{log.judul}</div>
+
+                      {/* Isi — always shown, 3 lines max unless expanded */}
+                      <div style={{
+                        fontSize: 13, color: T.gray600, lineHeight: 1.7, marginBottom: keg.length ? 10 : 0,
+                        ...(isExp ? { whiteSpace: 'pre-wrap' } : {
+                          overflow: 'hidden', display: '-webkit-box',
+                          WebkitLineClamp: 3, WebkitBoxOrient: 'vertical',
+                        }),
+                      }}>{log.isi}</div>
+
+                      {/* Kegiatan chips — always visible */}
+                      {keg.length > 0 && (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: isExp ? 12 : 0 }}>
+                          {keg.map((k: string, i: number) => (
+                            <span key={i} style={{ fontSize: 11, background: accentBg, color: accentCol, padding: '3px 10px', borderRadius: 20, border: `1px solid ${accentBdr}`, fontWeight: 500 }}>{k}</span>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Expanded: kendala + rencana */}
+                      {isExp && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: keg.length ? 0 : 4 }}>
+                          {log.kendala && (
+                            <div style={{ padding: '10px 13px', background: '#fff5f5', borderRadius: 8, border: '1px solid #fca5a5' }}>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: T.red, marginBottom: 5, display: 'flex', alignItems: 'center', gap: 5 }}>
+                                <AlertTriangle size={11} /> Kendala
+                              </div>
+                              <div style={{ fontSize: 12, color: T.gray700, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>{log.kendala}</div>
+                            </div>
+                          )}
+                          {log.rencana && (
+                            <div style={{ padding: '10px 13px', background: '#f0fdf4', borderRadius: 8, border: '1px solid #a7f3d0' }}>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: T.green, marginBottom: 5, display: 'flex', alignItems: 'center', gap: 5 }}>
+                                <CalendarDays size={11} /> Rencana Besok
+                              </div>
+                              <div style={{ fontSize: 12, color: T.gray700, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>{log.rencana}</div>
+                            </div>
+                          )}
+                          <div style={{ fontSize: 11, color: T.gray400, paddingTop: 2 }}>
+                            Dibuat {log.created_at?.slice(0, 16) || '—'}
+                            {log.updated_at && log.updated_at !== log.created_at ? ` · Diedit ${log.updated_at.slice(0, 16)}` : ''}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* ── Expand toggle — only if there's kendala/rencana or isi is long ── */}
+                    {(log.kendala || log.rencana || (log.isi || '').length > 200) && (
+                      <button onClick={() => setExpandedKey(isExp ? null : key)}
+                        style={{
+                          width: '100%', padding: '7px 0', border: 'none', borderTop: `1px solid ${T.gray100}`,
+                          background: T.gray50, cursor: 'pointer', fontFamily: SANS, fontSize: 11,
+                          color: T.gray500, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4,
+                        }}>
+                        {isExp ? <><ChevronUp size={12} /> Sembunyikan</> : <><ChevronDown size={12} /> Lihat selengkapnya</>}
+                      </button>
+                    )}
+                    </div>
+                  );
+                })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  // ── Auditor per SPV — clean card layout ──
+  const AuditorTab = () => {
+    const entries = Object.entries(audsBySpv);
+    if (entries.length === 0) return (
+      <div style={{ textAlign: 'center', padding: '56px 20px', color: T.gray400 }}>
+        <Users size={40} style={{ marginBottom: 12, opacity: .2 }} />
+        <div style={{ fontSize: 14, fontWeight: 600, color: T.gray600 }}>Belum ada data auditor</div>
+      </div>
+    );
+
+    const sorted = entries.sort(([a], [b]) =>
+      a === 'unassigned' ? 1 : b === 'unassigned' ? -1 : 0
+    );
+
+    const stCol: Record<string, string> = { Approved: T.green, Rejected: T.red, Pending: '#b45309' };
+    const stBg:  Record<string, string> = { Approved: '#dcfce7', Rejected: '#fee2e2', Pending: '#fef3c7' };
+
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+        {sorted.map(([spvKey, spvAuds]) => {
+          const isUnassigned = spvKey === 'unassigned';
+          const spvName      = isUnassigned ? 'Belum Assign' : (spvMap[spvKey] || `SPV #${spvKey}`);
+          const q            = search.toLowerCase();
+          const filtAuds     = !q ? spvAuds : spvAuds.filter((a: any) =>
+            a.full_name?.toLowerCase().includes(q) || a.username?.toLowerCase().includes(q) ||
+            (repsByAud[a.id] || []).some((r: any) => r.nama_pt?.toLowerCase().includes(q))
+          );
+          if (filtAuds.length === 0 && q) return null;
+
+          // aggregate stats for this SPV
+          const allReps    = spvAuds.flatMap((a: any) => repsByAud[a.id] || []);
+          const totalReps  = allReps.length;
+          const cntApp     = allReps.filter((r: any) => r.approval_status === 'Approved').length;
+          const cntPend    = allReps.filter((r: any) => r.approval_status === 'Pending').length;
+          const cntRej     = allReps.filter((r: any) => r.approval_status === 'Rejected').length;
+          const initials   = spvName.split(' ').map((w: string) => w[0]).join('').toUpperCase().slice(0, 2);
+
+          return (
+            <div key={spvKey}>
+              {/* ── SPV Header card ── */}
+              <div style={{
+                background: isUnassigned
+                  ? `linear-gradient(135deg, ${T.gray100} 0%, ${T.gray50} 100%)`
+                  : `linear-gradient(135deg, ${T.blue900} 0%, #1a4478 100%)`,
+                borderRadius: '14px 14px 0 0',
+                padding: '18px 22px',
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16,
+                borderLeft: `4px solid ${isUnassigned ? T.gray400 : T.blue500}`,
+              }}>
+                {/* Left: avatar + info */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                  <div style={{
+                    width: 48, height: 48, borderRadius: 14, flexShrink: 0,
+                    background: isUnassigned ? T.gray300 : 'rgba(255,255,255,0.15)',
+                    border: `2px solid ${isUnassigned ? T.gray400 : 'rgba(255,255,255,0.25)'}`,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 16, fontWeight: 800,
+                    color: isUnassigned ? T.gray600 : T.white,
+                  }}>
+                    {isUnassigned ? <AlertTriangle size={20} color={T.gray500} /> : initials}
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: isUnassigned ? T.gray600 : T.white, lineHeight: 1.2 }}>
+                      {spvName}
+                    </div>
+                    <div style={{ fontSize: 12, color: isUnassigned ? T.gray400 : 'rgba(255,255,255,0.6)', marginTop: 3 }}>
+                      Supervisor · {filtAuds.length} auditor
+                    </div>
+                  </div>
+                </div>
+
+                {/* Right: stat pills */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                  <div style={{ textAlign: 'center', background: 'rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 14px' }}>
+                    <div style={{ fontSize: 18, fontWeight: 800, color: isUnassigned ? T.gray700 : T.white }}>{totalReps}</div>
+                    <div style={{ fontSize: 10, color: isUnassigned ? T.gray500 : 'rgba(255,255,255,0.55)', marginTop: 1 }}>Total</div>
+                  </div>
+                  {cntApp > 0 && (
+                    <div style={{ textAlign: 'center', background: '#dcfce7', borderRadius: 10, padding: '6px 14px' }}>
+                      <div style={{ fontSize: 18, fontWeight: 800, color: T.green }}>{cntApp}</div>
+                      <div style={{ fontSize: 10, color: T.green, marginTop: 1 }}>Approved</div>
+                    </div>
+                  )}
+                  {cntPend > 0 && (
+                    <div style={{ textAlign: 'center', background: '#fef3c7', borderRadius: 10, padding: '6px 14px' }}>
+                      <div style={{ fontSize: 18, fontWeight: 800, color: '#b45309' }}>{cntPend}</div>
+                      <div style={{ fontSize: 10, color: '#b45309', marginTop: 1 }}>Pending</div>
+                    </div>
+                  )}
+                  {cntRej > 0 && (
+                    <div style={{ textAlign: 'center', background: '#fee2e2', borderRadius: 10, padding: '6px 14px' }}>
+                      <div style={{ fontSize: 18, fontWeight: 800, color: T.red }}>{cntRej}</div>
+                      <div style={{ fontSize: 10, color: T.red, marginTop: 1 }}>Rejected</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* ── Auditor cards grid ── */}
+              <div style={{
+                background: T.white,
+                border: `1px solid ${T.gray200}`, borderTop: 'none',
+                borderRadius: '0 0 14px 14px',
+                padding: '18px 18px 8px',
+              }}>
+                {filtAuds.length === 0 ? (
+                  <div style={{ padding: '20px', textAlign: 'center', fontSize: 13, color: T.gray400 }}>
+                    Tidak ada auditor yang sesuai pencarian
+                  </div>
+                ) : (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 12, marginBottom: 10 }}>
+                    {filtAuds.map((aud: any) => {
+                      const reps     = (repsByAud[aud.id] || []).filter((r: any) => (!dateFrom || (r.tanggal || '') >= dateFrom) && (!dateTo || (r.tanggal || '') <= dateTo));
+                      const isExp    = expandedAud === aud.id;
+                      const app      = reps.filter((r: any) => r.approval_status === 'Approved').length;
+                      const pend     = reps.filter((r: any) => r.approval_status === 'Pending').length;
+                      const rej      = reps.filter((r: any) => r.approval_status === 'Rejected').length;
+                      const avgProg  = reps.length ? Math.round(reps.reduce((s: number, r: any) => s + (r.progress || 0), 0) / reps.length) : 0;
+                      const progCol  = avgProg >= 80 ? T.green : avgProg >= 50 ? T.blue600 : '#b45309';
+                      const audInit  = aud.full_name?.split(' ').map((w: string) => w[0]).join('').toUpperCase().slice(0, 2) || '?';
+
+                      return (
+                        <div key={aud.id} style={{
+                          border: `1.5px solid ${isExp ? T.blue100 : T.gray200}`,
+                          borderRadius: 12,
+                          background: isExp ? '#f7f9ff' : T.white,
+                          overflow: 'hidden',
+                          transition: 'border-color 0.15s, background 0.15s',
+                        }}>
+                          {/* Card body */}
+                          <div style={{ padding: '14px 16px' }}>
+                            {/* Avatar row */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+                              <div style={{
+                                width: 40, height: 40, borderRadius: 12, flexShrink: 0,
+                                background: `linear-gradient(135deg, ${T.blue700}, ${T.blue500})`,
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                fontSize: 14, fontWeight: 800, color: T.white,
+                              }}>{audInit}</div>
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: 14, fontWeight: 700, color: T.gray900, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{aud.full_name}</div>
+                                <div style={{ fontSize: 11, color: T.gray400, marginTop: 1 }}>@{aud.username}</div>
+                              </div>
+                            </div>
+
+                            {/* Progress bar */}
+                            <div style={{ marginBottom: 10 }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
+                                <span style={{ fontSize: 11, color: T.gray500 }}>Avg. Progress</span>
+                                <span style={{ fontSize: 12, fontWeight: 700, color: progCol }}>{avgProg}%</span>
+                              </div>
+                              <div style={{ height: 5, background: T.gray100, borderRadius: 4, overflow: 'hidden' }}>
+                                <div style={{ height: '100%', width: `${avgProg}%`, background: progCol, borderRadius: 4, transition: 'width 0.4s ease' }} />
+                              </div>
+                            </div>
+
+                            {/* Stats row */}
+                            <div style={{ display: 'flex', gap: 6, marginBottom: 12 }}>
+                              {[
+                                { label: 'Approved', val: app,  col: T.green,   bg: '#dcfce7' },
+                                { label: 'Pending',  val: pend, col: '#b45309', bg: '#fef3c7' },
+                                { label: 'Rejected', val: rej,  col: T.red,     bg: '#fee2e2' },
+                              ].map(s => (
+                                <div key={s.label} style={{
+                                  flex: 1, textAlign: 'center', background: s.val > 0 ? s.bg : T.gray50,
+                                  borderRadius: 8, padding: '5px 4px',
+                                }}>
+                                  <div style={{ fontSize: 15, fontWeight: 800, color: s.val > 0 ? s.col : T.gray300 }}>{s.val}</div>
+                                  <div style={{ fontSize: 9, color: s.val > 0 ? s.col : T.gray300, marginTop: 1, fontWeight: 600 }}>{s.label}</div>
+                                </div>
+                              ))}
+                            </div>
+
+                            {/* Expand button */}
+                            <button
+                              onClick={() => setExpandedAud(isExp ? null : aud.id)}
+                              style={{
+                                width: '100%', padding: '7px 0', borderRadius: 8,
+                                border: `1px solid ${isExp ? T.blue100 : T.gray200}`,
+                                background: isExp ? T.blue50 : T.white,
+                                color: isExp ? T.blue700 : T.gray600,
+                                fontFamily: SANS, fontSize: 12, fontWeight: 600,
+                                cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                                transition: 'all 0.15s',
+                              }}
+                            >
+                              {isExp ? <><ChevronUp size={13} /> Sembunyikan</> : <><ChevronDown size={13} /> {reps.length} Laporan</>}
+                            </button>
+                          </div>
+
+                          {/* Expanded report list — day-by-day feed */}
+                          {isExp && (
+                            <div style={{ borderTop: `1px solid ${T.blue100}`, background: '#fafbff' }}>
+                              {reps.length === 0 ? (
+                                <div style={{ padding: '20px', textAlign: 'center', fontSize: 12, color: T.gray400 }}>
+                                  Belum ada laporan dalam rentang yang dipilih
+                                </div>
+                              ) : (
+                                <div style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                  {Object.entries(groupByDate(reps)).sort(([a], [b]) => b.localeCompare(a)).map(([tgl, dayReps]) => (
+                                    <div key={tgl}>
+                                      {/* Day label */}
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 6 }}>
+                                        <div style={{ fontSize: 10, fontWeight: 700, color: T.blue700, background: T.blue50, border: `1px solid ${T.blue100}`, borderRadius: 6, padding: '2px 8px', whiteSpace: 'nowrap' }}>
+                                          {fmtFullDate(tgl)}
+                                        </div>
+                                        <div style={{ flex: 1, height: 1, background: T.gray200 }} />
+                                      </div>
+                                      {/* Reports for this day */}
+                                      {(dayReps as any[]).map((rep: any) => {
+                                        const pct = rep.progress || 0;
+                                        const pc  = pct >= 80 ? T.green : pct >= 50 ? T.blue600 : '#b45309';
+                                        return (
+                                          <div key={rep.id} style={{
+                                            background: T.white, borderRadius: 10,
+                                            border: `1px solid ${T.gray200}`,
+                                            padding: '11px 13px', marginBottom: 6,
+                                            boxShadow: '0 1px 3px rgba(0,0,0,.04)',
+                                          }}>
+                                            {/* Top row: PT + time + status */}
+                                            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 6 }}>
+                                              <div>
+                                                <div style={{ fontSize: 13, fontWeight: 700, color: T.gray900 }}>{rep.nama_pt}</div>
+                                                <div style={{ fontSize: 11, color: T.gray400, marginTop: 2, display: 'flex', alignItems: 'center', gap: 4 }}>
+                                                  <Clock size={10} /> {rep.jam_mulai} – {rep.jam_selesai}
+                                                  <span style={{ color: T.gray300 }}>·</span>
+                                                  <MapPin size={10} /> {rep.area_diaudit}
+                                                </div>
+                                              </div>
+                                              <span style={{ fontSize: 10, fontWeight: 700, padding: '3px 9px', borderRadius: 20, flexShrink: 0, marginLeft: 8, background: stBg[rep.approval_status] || T.gray100, color: stCol[rep.approval_status] || T.gray500 }}>
+                                                {rep.approval_status || 'Draft'}
+                                              </span>
+                                            </div>
+                                            {/* Description */}
+                                            <div style={{ fontSize: 12, color: T.gray600, lineHeight: 1.6, marginBottom: 8, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>
+                                              {rep.deskripsi_pekerjaan}
+                                            </div>
+                                            {/* Temuan */}
+                                            {rep.temuan && (
+                                              <div style={{ fontSize: 11, color: T.red, marginBottom: 8, display: 'flex', alignItems: 'flex-start', gap: 5, background: '#fff5f5', padding: '5px 9px', borderRadius: 6 }}>
+                                                <AlertTriangle size={11} style={{ flexShrink: 0, marginTop: 1 }} />
+                                                <span>{rep.temuan}</span>
+                                              </div>
+                                            )}
+                                            {/* Progress */}
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                              <div style={{ flex: 1, height: 5, background: T.gray100, borderRadius: 3, overflow: 'hidden' }}>
+                                                <div style={{ width: `${pct}%`, height: '100%', background: pc, borderRadius: 3, transition: 'width 0.4s' }} />
+                                              </div>
+                                              <span style={{ fontSize: 12, fontWeight: 700, color: pc, flexShrink: 0, minWidth: 34, textAlign: 'right' }}>{pct}%</span>
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  ))}
+                                  {reps.length > 15 && (
+                                    <div style={{ fontSize: 11, color: T.gray400, textAlign: 'center', paddingTop: 2 }}>
+                                      Menampilkan semua {reps.length} laporan — gunakan filter bulan untuk mempersempit
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  // ── summary stats ──
+  const pendingCnt = auditReps.filter(r => r.approval_status === 'Pending').length;
+
+  return (
+    <div>
+      <PageHeader title="Monitor Laporan" breadcrumb="Monitor Laporan">
+        <button onClick={load} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px', borderRadius: 8, border: `1px solid ${T.gray200}`, background: T.white, cursor: 'pointer', fontFamily: SANS, fontSize: 12, color: T.gray600 }}>
+          <RefreshCw size={13} /> Refresh
+        </button>
+      </PageHeader>
+
+      {/* ── Stats ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 20 }}>
+        {[
+          { label: 'Catatan Manager',   value: managerLogs.length,    color: '#7c3aed', bg: '#ede9fe', icon: Shield },
+          { label: 'Catatan Supervisor', value: supervisorLogs.length, color: T.blue700, bg: T.blue50,  icon: UserCheck },
+          { label: 'Laporan Auditor',   value: auditReps.length,      color: T.green,   bg: T.greenBg, icon: FileText },
+          { label: 'Pending Approval',  value: pendingCnt,            color: '#92400e', bg: '#fef3c7', icon: Clock },
+        ].map(s => (
+          <div key={s.label} style={{ background: T.white, borderRadius: 12, padding: '14px 16px', border: `1px solid ${T.gray200}`, display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ width: 40, height: 40, borderRadius: 10, background: s.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <s.icon size={18} color={s.color} />
+            </div>
+            <div>
+              <div style={{ fontSize: 22, fontWeight: 700, color: s.color, lineHeight: 1 }}>{s.value}</div>
+              <div style={{ fontSize: 11, color: T.gray500, marginTop: 2 }}>{s.label}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Inner tabs ── */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 16, flexWrap: 'wrap' }}>
+        {([
+          { id: 'manager', label: `Manager  (${managerLogs.length})` },
+          { id: 'spv',     label: `Supervisor  (${supervisorLogs.length})` },
+          { id: 'auditor', label: `Auditor per SPV` },
+        ] as { id: ITab; label: string }[]).map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={tabBtn(tab === t.id)}>{t.label}</button>
+        ))}
+      </div>
+
+      {/* ── Search + date filter ── */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap', alignItems: 'center' }}>
+        {/* Search */}
+        <div style={{ position: 'relative', minWidth: 200, flex: 1 }}>
+          <Search size={14} style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', color: T.gray400, pointerEvents: 'none' }} />
+          <input type="text" placeholder={tab === 'auditor' ? 'Cari nama auditor / PT...' : 'Cari nama, judul...'} value={search} onChange={e => setSearch(e.target.value)}
+            style={{ ...inp, paddingLeft: 34 }} onFocus={e => Object.assign(e.target.style, focus)} onBlur={e => Object.assign(e.target.style, blur)} />
+        </div>
+        {/* Presets */}
+        {(() => {
+          const todayStr    = new Date().toISOString().split('T')[0];
+          const d7AgoStr    = (() => { const d = new Date(); d.setDate(d.getDate() - 6); return d.toISOString().split('T')[0]; })();
+          const monthStart  = `${todayStr.slice(0, 7)}-01`;
+          const presets = [
+            { label: 'Hari Ini',  from: todayStr,    to: todayStr },
+            { label: '7 Hari',    from: d7AgoStr,    to: todayStr },
+            { label: 'Bulan Ini', from: monthStart,  to: todayStr },
+            { label: 'Semua',     from: '',          to: '' },
+          ];
+          return presets.map(p => {
+            const active = dateFrom === p.from && dateTo === p.to;
+            return (
+              <button key={p.label} onClick={() => { setDateFrom(p.from); setDateTo(p.to); }}
+                style={{ padding: '6px 14px', borderRadius: 20, border: `1px solid ${active ? T.blue600 : T.gray200}`, background: active ? T.blue50 : T.white, color: active ? T.blue700 : T.gray600, fontFamily: SANS, fontSize: 12, fontWeight: active ? 700 : 500, cursor: 'pointer', transition: 'all 0.15s', whiteSpace: 'nowrap' }}>
+                {p.label}
+              </button>
+            );
+          });
+        })()}
+        {/* Custom range */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
+            style={{ ...inp, width: 140 }} onFocus={e => Object.assign(e.target.style, focus)} onBlur={e => Object.assign(e.target.style, blur)} />
+          <span style={{ fontSize: 12, color: T.gray400 }}>–</span>
+          <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
+            style={{ ...inp, width: 140 }} onFocus={e => Object.assign(e.target.style, focus)} onBlur={e => Object.assign(e.target.style, blur)} />
+        </div>
+      </div>
+
+      {/* ── Content ── */}
+      {loading ? (
+        <div style={{ textAlign: 'center', padding: '48px 20px', color: T.gray400 }}>
+          <RefreshCw size={28} style={{ animation: 'spin 1s linear infinite', marginBottom: 10 }} />
+          <div>Memuat semua laporan...</div>
+        </div>
+      ) : (
+        <>
+          {tab === 'manager' && <TimelineTab list={applyFilter(managerLogs)} prefix="mgr" />}
+          {tab === 'spv'     && <TimelineTab list={applyFilter(supervisorLogs)} prefix="spv" />}
+          {tab === 'auditor' && <AuditorTab />}
+        </>
+      )}
+    </div>
+  );
+};
+
+// ─── SPV / MANAGER DAILY LOG ─────────────────────────────────────────────────
+const SpvDailyLog = () => {
+  const { user: me } = useAuth();
+  const toast = useToast();
+
+  const [logs, setLogs]           = useState<any[]>([]);
+  const [loading, setLoading]     = useState(true);
+  const [open, setOpen]           = useState(false);
+  const [editLog, setEditLog]     = useState<any | null>(null);
+  const [expanded, setExpanded]   = useState<number | null>(null);
+  const [deleting, setDeleting]   = useState<number | null>(null);
+  const [saving, setSaving]       = useState(false);
+  const [confirmDel, setConfirmDel] = useState<any | null>(null);
+  const [dateFrom, setDateFrom]     = useState<string>(() => { const d = new Date(); d.setDate(d.getDate() - 6); return d.toISOString().split('T')[0]; });
+  const [dateTo, setDateTo]         = useState<string>(new Date().toISOString().split('T')[0]);
+  const [expandedMonths, setExpandedMonths] = useState<Set<string>>(() => new Set([new Date().toISOString().slice(0, 7)]));
+
+  const today = new Date().toISOString().split('T')[0];
+  const initForm = { tanggal: today, judul: '', isi: '', kegiatan: '', kendala: '', rencana: '' };
+  const [form, setForm] = useState(initForm);
+  const f = (k: string) => (e: any) => setForm(p => ({ ...p, [k]: e.target.value }));
+
+  const load = useCallback(() => {
+    setLoading(true);
+    apiFetch('/api/spv-reports', me?.id)
+      .then(r => r.json())
+      .then(data => { setLogs(Array.isArray(data) ? data : []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, [me?.id]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const openAdd  = () => { setForm({ ...initForm, tanggal: new Date().toISOString().split('T')[0] }); setEditLog(null); setOpen(true); };
+  const openEdit = (log: any) => {
+    setForm({ tanggal: log.tanggal, judul: log.judul, isi: log.isi, kegiatan: log.kegiatan || '', kendala: log.kendala || '', rencana: log.rencana || '' });
+    setEditLog(log); setOpen(true);
+  };
+  const closeModal = () => { setOpen(false); setEditLog(null); setForm(initForm); };
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!form.judul.trim() || !form.isi.trim()) { toast('Judul dan isi wajib diisi', 'error'); return; }
+    setSaving(true);
+    try {
+      const url = editLog ? `/api/spv-reports/${editLog.id}` : '/api/spv-reports';
+      const r = await apiFetch(url, me?.id, {
+        method: editLog ? 'PATCH' : 'POST',
+        body: JSON.stringify(form),
+      });
+      if (!r.ok) { const err = await r.json(); throw new Error(err.error || 'Gagal menyimpan'); }
+      toast(editLog ? 'Catatan diperbarui' : 'Catatan berhasil disimpan', 'success');
+      closeModal(); load();
+    } catch (ex: any) { toast(ex.message, 'error'); }
+    finally { setSaving(false); }
+  };
+
+  const remove = async (id: number) => {
+    setDeleting(id);
+    try {
+      const r = await apiFetch(`/api/spv-reports/${id}`, me?.id, { method: 'DELETE' });
+      if (!r.ok) throw new Error('Gagal menghapus');
+      toast('Catatan dihapus', 'success');
+      if (expanded === id) setExpanded(null);
+      load();
+    } catch (ex: any) { toast(ex.message, 'error'); }
+    finally { setDeleting(null); setConfirmDel(null); }
+  };
+
+  // ── Stats ──
+  const thisMonth   = new Date().toISOString().slice(0, 7);
+  const weekStart   = (() => { const d = new Date(); d.setDate(d.getDate() - d.getDay()); return d.toISOString().split('T')[0]; })();
+  const cntMonth    = logs.filter(l => l.tanggal?.startsWith(thisMonth)).length;
+  const cntWeek     = logs.filter(l => l.tanggal >= weekStart).length;
+
+  // ── Date filter ──
+  const filteredLogs = logs.filter(l => {
+    const tgl = l.tanggal || '';
+    return (!dateFrom || tgl >= dateFrom) && (!dateTo || tgl <= dateTo);
+  });
+
+  const toggleMonth = (key: string) => setExpandedMonths(prev => {
+    const next = new Set(prev); next.has(key) ? next.delete(key) : next.add(key); return next;
+  });
+
+  // ── Group by month (YYYY-MM) ──
+  const grouped: Record<string, any[]> = filteredLogs.reduce((acc: Record<string, any[]>, log) => {
+    const key = (log.tanggal || '—').slice(0, 7);
+    if (!acc[key]) acc[key] = [];
+    acc[key].push(log);
+    return acc;
+  }, {} as Record<string, any[]>);
+
+  const MONTHS = ['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agt','Sep','Okt','Nov','Des'];
+  const DAYS   = ['Min','Sen','Sel','Rab','Kam','Jum','Sab'];
+
+  const fmtMonth = (key: string) => {
+    const [y, m] = key.split('-');
+    return `${MONTHS[parseInt(m) - 1]} ${y}`;
+  };
+  const fmtBadge = (tgl: string) => {
+    const d = new Date(tgl + 'T00:00:00');
+    return { day: d.getDate(), mon: MONTHS[d.getMonth()], dow: DAYS[d.getDay()] };
+  };
+
+  return (
+    <div>
+      <PageHeader title="Catatan Harian" breadcrumb="Catatan Harian">
+        <BtnPrimary onClick={openAdd}><Plus size={14} /> Buat Catatan</BtnPrimary>
+      </PageHeader>
+
+      {/* ── Stats ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginBottom: 20 }}>
+        {[
+          { label: 'Total Catatan', value: logs.length, color: T.blue700, bg: T.blue50, icon: BookOpen },
+          { label: 'Bulan Ini',     value: cntMonth,    color: T.green,   bg: T.greenBg, icon: CalendarDays },
+          { label: 'Minggu Ini',    value: cntWeek,     color: '#7c3aed', bg: '#ede9fe', icon: Activity },
+        ].map(s => (
+          <div key={s.label} style={{ background: T.white, borderRadius: 12, padding: '16px 18px', border: `1px solid ${T.gray200}`, display: 'flex', alignItems: 'center', gap: 14 }}>
+            <div style={{ width: 42, height: 42, borderRadius: 10, background: s.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+              <s.icon size={20} color={s.color} />
+            </div>
+            <div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: s.color, lineHeight: 1 }}>{s.value}</div>
+              <div style={{ fontSize: 12, color: T.gray500, marginTop: 3 }}>{s.label}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* ── Filter bar ── */}
+      {!loading && logs.length > 0 && (() => {
+        const d7Ago = (() => { const d = new Date(); d.setDate(d.getDate() - 6); return d.toISOString().split('T')[0]; })();
+        const monthStart = `${today.slice(0, 7)}-01`;
+        const presets = [
+          { label: 'Hari Ini',  from: today,       to: today },
+          { label: '7 Hari',    from: d7Ago,        to: today },
+          { label: 'Bulan Ini', from: monthStart,   to: today },
+          { label: 'Semua',     from: '',           to: '' },
+        ];
+        return (
+          <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap', alignItems: 'center' }}>
+            {presets.map(p => {
+              const active = dateFrom === p.from && dateTo === p.to;
+              return (
+                <button key={p.label} onClick={() => { setDateFrom(p.from); setDateTo(p.to); }}
+                  style={{ padding: '6px 14px', borderRadius: 20, border: `1px solid ${active ? T.blue600 : T.gray200}`, background: active ? T.blue50 : T.white, color: active ? T.blue700 : T.gray600, fontFamily: SANS, fontSize: 12, fontWeight: active ? 700 : 500, cursor: 'pointer', transition: 'all 0.15s' }}>
+                  {p.label}
+                </button>
+              );
+            })}
+            <div style={{ flex: 1, minWidth: 220, display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'flex-end' }}>
+              <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
+                style={{ ...inp, width: 140 }} onFocus={e => Object.assign(e.target.style, focus)} onBlur={e => Object.assign(e.target.style, blur)} />
+              <span style={{ fontSize: 12, color: T.gray400 }}>–</span>
+              <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
+                style={{ ...inp, width: 140 }} onFocus={e => Object.assign(e.target.style, focus)} onBlur={e => Object.assign(e.target.style, blur)} />
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Loading ── */}
+      {loading && (
+        <div style={{ textAlign: 'center', padding: '48px 20px', color: T.gray400 }}>
+          <RefreshCw size={28} style={{ animation: 'spin 1s linear infinite', marginBottom: 10 }} />
+          <div>Memuat catatan...</div>
+        </div>
+      )}
+
+      {/* ── Empty state ── */}
+      {!loading && logs.length === 0 && (
+        <div style={{ textAlign: 'center', padding: '64px 20px', color: T.gray400 }}>
+          <div style={{ width: 72, height: 72, borderRadius: '50%', background: T.blue50, display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
+            <BookOpen size={32} color={T.blue700} />
+          </div>
+          <div style={{ fontSize: 16, fontWeight: 600, color: T.gray600, marginBottom: 6 }}>Belum ada catatan harian</div>
+          <div style={{ fontSize: 13, color: T.gray400, marginBottom: 20 }}>Mulai catat aktivitas dan kegiatan harian Anda di sini</div>
+          <BtnPrimary onClick={openAdd}><Plus size={14} /> Buat Catatan Pertama</BtnPrimary>
+        </div>
+      )}
+
+      {/* ── No results for filter ── */}
+      {!loading && logs.length > 0 && filteredLogs.length === 0 && (
+        <div style={{ textAlign: 'center', padding: '48px 20px', color: T.gray400 }}>
+          <CalendarDays size={32} style={{ marginBottom: 10, opacity: .3 }} />
+          <div style={{ fontSize: 14, fontWeight: 600, color: T.gray600, marginBottom: 4 }}>Tidak ada catatan dalam rentang ini</div>
+          <div style={{ fontSize: 12 }}>Coba ubah rentang tanggal atau pilih "Semua"</div>
+        </div>
+      )}
+
+      {/* ── Timeline grouped by month ── */}
+      {!loading && Object.entries(grouped)
+        .sort(([a], [b]) => b.localeCompare(a))
+        .map(([monthKey, monthLogs]) => {
+          const isExpMonth = expandedMonths.has(monthKey);
+          return (
+          <div key={monthKey} style={{ marginBottom: 28 }}>
+            {/* Month separator — clickable */}
+            <button onClick={() => toggleMonth(monthKey)} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, marginBottom: isExpMonth ? 14 : 0, background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: T.blue700, letterSpacing: '0.1em', textTransform: 'uppercase', background: T.blue50, border: `1px solid ${T.blue100}`, borderRadius: 20, padding: '3px 12px', display: 'flex', alignItems: 'center', gap: 5 }}>
+                {isExpMonth ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+                {fmtMonth(monthKey)}
+              </div>
+              <div style={{ flex: 1, height: 1, background: T.gray200 }} />
+              <div style={{ fontSize: 11, color: T.gray400 }}>{monthLogs.length} catatan</div>
+            </button>
+
+            {/* Entries — only if month is expanded */}
+            {isExpMonth && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {monthLogs.map(log => {
+                const badge      = fmtBadge(log.tanggal);
+                const isExpanded = expanded === log.id;
+                const isBusy     = deleting === log.id;
+                const kegiatan   = log.kegiatan ? (log.kegiatan as string).split('\n').map((s: string) => s.trim()).filter(Boolean) : [];
+
+                return (
+                  <div key={log.id} style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
+                    {/* Date badge */}
+                    <div style={{
+                      flexShrink: 0, width: 56, textAlign: 'center',
+                      background: T.blue900, borderRadius: 12, padding: '8px 4px',
+                      color: T.white, boxShadow: '0 2px 6px rgba(30,58,95,0.25)',
+                    }}>
+                      <div style={{ fontSize: 22, fontWeight: 800, lineHeight: 1 }}>{badge.day}</div>
+                      <div style={{ fontSize: 10, opacity: 0.75, marginTop: 2, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{badge.mon}</div>
+                      <div style={{ fontSize: 10, opacity: 0.5, marginTop: 1 }}>{badge.dow}</div>
+                    </div>
+
+                    {/* Card */}
+                    <div style={{
+                      flex: 1, background: T.white, borderRadius: 12,
+                      border: `1px solid ${isExpanded ? T.blue100 : T.gray200}`,
+                      boxShadow: isExpanded ? `0 0 0 2px ${T.blue50}` : 'none',
+                      transition: 'border-color 0.15s, box-shadow 0.15s', overflow: 'hidden',
+                    }}>
+                      {/* Card header (always visible) */}
+                      <div
+                        onClick={() => setExpanded(isExpanded ? null : log.id)}
+                        style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '12px 14px', cursor: 'pointer', gap: 10 }}
+                      >
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 14, fontWeight: 600, color: T.gray900, marginBottom: 3 }}>{log.judul}</div>
+                          {!isExpanded && (
+                            <div style={{
+                              fontSize: 12, color: T.gray500, lineHeight: 1.5,
+                              overflow: 'hidden', display: '-webkit-box',
+                              WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+                            }}>{log.isi}</div>
+                          )}
+                          {!isExpanded && kegiatan.length > 0 && (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 6 }}>
+                              {kegiatan.slice(0, 4).map((k: string, i: number) => (
+                                <span key={i} style={{ fontSize: 10, background: T.blue50, color: T.blue700, padding: '2px 7px', borderRadius: 20, border: `1px solid ${T.blue100}` }}>{k}</span>
+                              ))}
+                              {kegiatan.length > 4 && <span style={{ fontSize: 10, color: T.gray400 }}>+{kegiatan.length - 4}</span>}
+                            </div>
+                          )}
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 2, flexShrink: 0 }}>
+                          <button
+                            onClick={e => { e.stopPropagation(); openEdit(log); }}
+                            title="Edit"
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px 6px', borderRadius: 6, color: T.blue600, display: 'flex', transition: 'background 0.12s' }}
+                            onMouseEnter={e => (e.currentTarget.style.background = T.blue50)}
+                            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                          ><Edit2 size={13} /></button>
+                          <button
+                            onClick={e => { e.stopPropagation(); setConfirmDel(log); }}
+                            title="Hapus"
+                            disabled={isBusy}
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px 6px', borderRadius: 6, color: T.red, display: 'flex', transition: 'background 0.12s' }}
+                            onMouseEnter={e => (e.currentTarget.style.background = T.redBg)}
+                            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                          >
+                            {isBusy ? <RefreshCw size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <Trash2 size={13} />}
+                          </button>
+                          <div style={{ color: T.gray300, marginLeft: 2 }}>
+                            {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Expanded body */}
+                      {isExpanded && (
+                        <div style={{ padding: '0 14px 14px', borderTop: `1px solid ${T.gray100}` }}>
+                          {/* Isi */}
+                          <div style={{ fontSize: 13, color: T.gray700, lineHeight: 1.75, marginTop: 12, whiteSpace: 'pre-wrap', marginBottom: 12 }}>
+                            {log.isi}
+                          </div>
+
+                          {/* Kegiatan chips */}
+                          {kegiatan.length > 0 && (
+                            <div style={{ marginBottom: 10 }}>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: T.gray500, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6 }}>Kegiatan</div>
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                                {kegiatan.map((k: string, i: number) => (
+                                  <span key={i} style={{ fontSize: 12, background: T.blue50, color: T.blue700, padding: '4px 10px', borderRadius: 20, border: `1px solid ${T.blue100}` }}>
+                                    {k}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Kendala */}
+                          {log.kendala && (
+                            <div style={{ marginBottom: 8, padding: '10px 12px', background: '#fff5f5', borderRadius: 8, border: '1px solid #fca5a5' }}>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: T.red, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 5 }}>
+                                <AlertTriangle size={11} /> Kendala
+                              </div>
+                              <div style={{ fontSize: 12, color: T.gray700, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{log.kendala}</div>
+                            </div>
+                          )}
+
+                          {/* Rencana besok */}
+                          {log.rencana && (
+                            <div style={{ marginBottom: 8, padding: '10px 12px', background: T.greenBg, borderRadius: 8, border: '1px solid #a7f3d0' }}>
+                              <div style={{ fontSize: 11, fontWeight: 700, color: T.green, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 5 }}>
+                                <CalendarDays size={11} /> Rencana Besok
+                              </div>
+                              <div style={{ fontSize: 12, color: T.gray700, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{log.rencana}</div>
+                            </div>
+                          )}
+
+                          {/* Meta */}
+                          <div style={{ marginTop: 10, fontSize: 11, color: T.gray400, display: 'flex', gap: 12 }}>
+                            <span>📅 {log.created_at?.slice(0, 16) || '—'}</span>
+                            {log.updated_at && log.updated_at !== log.created_at && (
+                              <span>✏️ Diperbarui {log.updated_at?.slice(0, 16)}</span>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            )}
+          </div>
+          );
+        })}
+
+      {/* ── Create / Edit Modal ── */}
+      <Modal open={open} onClose={closeModal} title={editLog ? 'Edit Catatan Harian' : 'Buat Catatan Harian'} subtitle="Catat aktivitas dan kegiatan harian Anda" wide>
+        <form onSubmit={submit}>
+          <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: 12, marginBottom: 4 }}>
+            <Field label="Tanggal">
+              <input type="date" value={form.tanggal} onChange={f('tanggal')} required style={inp}
+                onFocus={e => Object.assign(e.target.style, focus)} onBlur={e => Object.assign(e.target.style, blur)} />
+            </Field>
+            <Field label="Judul">
+              <input type="text" value={form.judul} onChange={f('judul')} required placeholder="Ringkasan singkat hari ini" style={inp}
+                onFocus={e => Object.assign(e.target.style, focus)} onBlur={e => Object.assign(e.target.style, blur)} />
+            </Field>
+          </div>
+
+          <Field label="Catatan / Aktivitas *">
+            <Textarea value={form.isi} onChange={f('isi')} required rows={5}
+              placeholder="Deskripsikan aktivitas, kegiatan, dan hasil kerja hari ini secara bebas..." />
+          </Field>
+
+          <Field label="Kegiatan (satu per baris, opsional)">
+            <Textarea value={form.kegiatan} onChange={f('kegiatan')} rows={3}
+              placeholder={'Rapat Tim\nReview Laporan Auditor\nKunjungan PT ABC'} />
+            <div style={{ fontSize: 11, color: T.gray400, marginTop: 4 }}>Setiap baris akan tampil sebagai tag kegiatan</div>
+          </Field>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <Field label="Kendala (opsional)">
+              <Textarea value={form.kendala} onChange={f('kendala')} rows={3}
+                placeholder="Hambatan atau kendala yang dihadapi hari ini..." />
+            </Field>
+            <Field label="Rencana Besok (opsional)">
+              <Textarea value={form.rencana} onChange={f('rencana')} rows={3}
+                placeholder="Rencana kegiatan untuk hari berikutnya..." />
+            </Field>
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 6 }}>
+            <BtnSecondary type="button" onClick={closeModal}>Batal</BtnSecondary>
+            <BtnPrimary type="submit" disabled={saving}>
+              {saving ? 'Menyimpan...' : (editLog ? 'Simpan Perubahan' : 'Simpan Catatan')}
+            </BtnPrimary>
+          </div>
+        </form>
+      </Modal>
+
+      {/* ── Delete Confirmation Modal ── */}
+      <Modal open={!!confirmDel} onClose={() => setConfirmDel(null)} title="Hapus Catatan?" subtitle="Tindakan ini tidak dapat dibatalkan">
+        <div style={{ fontSize: 13, color: T.gray700, marginBottom: 6 }}>
+          Catatan <strong>"{confirmDel?.judul}"</strong> ({confirmDel?.tanggal}) akan dihapus permanen.
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 20 }}>
+          <BtnSecondary onClick={() => setConfirmDel(null)}>Batal</BtnSecondary>
+          <button
+            onClick={() => remove(confirmDel?.id)}
+            disabled={!!deleting}
+            style={{ padding: '9px 18px', borderRadius: 8, background: T.red, color: T.white, border: 'none', fontFamily: SANS, fontWeight: 600, fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}
+          >
+            <Trash2 size={13} /> {deleting ? 'Menghapus...' : 'Ya, Hapus'}
+          </button>
+        </div>
+      </Modal>
+    </div>
+  );
+};
+
 // ─── USER MANAGEMENT ─────────────────────────────────────────────────────────
 const UserManagement = () => {
   const { user: me } = useAuth();
@@ -3037,13 +4102,14 @@ const UserManagement = () => {
 
   // State
   const [users, setUsers]           = useState<any[]>([]);
+  const [supervisors, setSupervisors] = useState<any[]>([]);
   const [open, setOpen]             = useState(false);
   const [editUser, setEditUser]     = useState<any | null>(null);
   const [pwModal, setPwModal]       = useState<any | null>(null); // user target reset pw
   const [saving, setSaving]         = useState(false);
   const [showPw, setShowPw]         = useState(false);
 
-  const initForm = { username: '', password: '', full_name: '', role: 'Auditor', email: '' };
+  const initForm = { username: '', password: '', full_name: '', role: 'Auditor', email: '', supervisor_id: '' };
   const [form, setForm]             = useState(initForm);
   const [pwForm, setPwForm]         = useState({ new_password: '', confirm: '' });
 
@@ -3052,13 +4118,17 @@ const UserManagement = () => {
       .then(r => { if (!r.ok) throw new Error('Gagal memuat data user'); return r.json(); })
       .then(setUsers)
       .catch(e => toast(e.message, 'error'));
+    apiFetch('/api/supervisors', me?.id)
+      .then(r => r.json())
+      .then(setSupervisors)
+      .catch(() => {});
   }, [me?.id]);
 
   useEffect(() => { load(); }, [load]);
 
   const openAdd = () => { setForm(initForm); setEditUser(null); setOpen(true); };
   const openEdit = (u: any) => {
-    setForm({ username: u.username, password: '', full_name: u.full_name, role: u.role, email: u.email || '' });
+    setForm({ username: u.username, password: '', full_name: u.full_name, role: u.role, email: u.email || '', supervisor_id: u.supervisor_id ? String(u.supervisor_id) : '' });
     setEditUser(u);
     setOpen(true);
   };
@@ -3080,19 +4150,23 @@ const UserManagement = () => {
     setSaving(true);
     try {
       if (editUser) {
-        // Edit — kirim field yang relevan, termasuk email
+        // Edit — kirim field yang relevan, termasuk email & supervisor_id
         const payload: any = { full_name: form.full_name, role: form.role };
-        // Sertakan email jika user adalah Auditor (atau jika diisi)
         if (editUser.role === 'Auditor' || form.role === 'Auditor' || form.email.trim()) {
           payload.email = form.email.trim();
+        }
+        if (form.role === 'Auditor' || editUser.role === 'Auditor') {
+          payload.supervisor_id = form.supervisor_id ? Number(form.supervisor_id) : null;
         }
         const r = await apiFetch(`/api/users/${editUser.id}`, me?.id, { method: 'PATCH', body: JSON.stringify(payload) });
         if (!r.ok) { const err = await r.json(); throw new Error(err.error || 'Gagal menyimpan'); }
         toast('Data user berhasil diperbarui', 'success');
       } else {
-        // Create — sertakan email jika ada
+        // Create — sertakan email & supervisor_id jika ada
         const payload: any = { ...form };
-        if (!payload.email) delete payload.email; // hapus jika kosong
+        if (!payload.email) delete payload.email;
+        if (!payload.supervisor_id) delete payload.supervisor_id;
+        else payload.supervisor_id = Number(payload.supervisor_id);
         const r = await apiFetch('/api/users', me?.id, { method: 'POST', body: JSON.stringify(payload) });
         if (!r.ok) { const err = await r.json(); throw new Error(err.error || 'Gagal membuat akun'); }
         toast(`Akun "${form.username}" berhasil dibuat`, 'success');
@@ -3187,7 +4261,7 @@ const UserManagement = () => {
       </div>
 
       {/* Table */}
-      <DataTable title={`Daftar User (${users.length})`} cols={['User', 'Username', 'Email (Auditor Login)', 'Role', 'Status', 'Aksi']}>
+      <DataTable title={`Daftar User (${users.length})`} cols={['User', 'Username', 'Email (Auditor Login)', 'Supervisor', 'Role', 'Status', 'Aksi']}>
         {users.length === 0 ? (
           <tr><td colSpan={6} style={{ textAlign: 'center', padding: 40, fontSize: 13, color: T.gray400 }}>Belum ada user.</td></tr>
         ) : users.map((u: any) => (
@@ -3232,6 +4306,22 @@ const UserManagement = () => {
                   <AlertTriangle size={11} style={{ color: T.yellow, flexShrink: 0 }} />
                   <span style={{ fontSize: 11, color: T.yellow, fontWeight: 600 }}>Belum diset</span>
                 </div>
+              ) : (
+                <span style={{ fontSize: 11, color: T.gray300 }}>—</span>
+              )}
+            </td>
+            {/* Supervisor — hanya tampil untuk Auditor */}
+            <td style={{ padding: '13px 16px', borderBottom: `1px solid ${T.gray100}` }}>
+              {u.role === 'Auditor' ? (
+                u.supervisor_name
+                  ? <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                      <UserCheck size={11} style={{ color: T.blue700, flexShrink: 0 }} />
+                      <span style={{ fontSize: 12, color: T.blue700, fontWeight: 500 }}>{u.supervisor_name}</span>
+                    </div>
+                  : <div style={{ display: 'flex', alignItems: 'center', gap: 5 }} title="Auditor belum di-assign ke SPV">
+                      <AlertTriangle size={11} style={{ color: T.yellow, flexShrink: 0 }} />
+                      <span style={{ fontSize: 11, color: T.yellow, fontWeight: 600 }}>Belum assign</span>
+                    </div>
               ) : (
                 <span style={{ fontSize: 11, color: T.gray300 }}>—</span>
               )}
@@ -3334,6 +4424,20 @@ const UserManagement = () => {
               <option value="Admin">Admin</option>
             </Select>
           </Field>
+          {/* Supervisor — hanya tampil saat role Auditor */}
+          {(form.role === 'Auditor' || (editUser && editUser.role === 'Auditor')) && (
+            <Field label="Supervisor (Opsional)">
+              <Select value={form.supervisor_id} onChange={f('supervisor_id')}>
+                <option value="">— Belum assign —</option>
+                {supervisors.map((spv: any) => (
+                  <option key={spv.id} value={spv.id}>{spv.full_name}</option>
+                ))}
+              </Select>
+              <div style={{ fontSize: 11, color: T.gray500, marginTop: 4 }}>
+                Pilih SPV yang bertanggung jawab atas Auditor ini.
+              </div>
+            </Field>
+          )}
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 8, paddingTop: 16, borderTop: `1px solid ${T.gray100}` }}>
             <BtnSecondary onClick={closeModal}>Batal</BtnSecondary>
             <BtnPrimary type="submit" disabled={saving}>
@@ -4479,9 +5583,11 @@ export default function App() {
     { id: 'pts',         label: 'PT Management',   icon: Building2,       roles: ['Admin', 'Supervisor', 'Manager'] },
     { id: 'assignments', label: 'Assignments',     icon: Users,           roles: ['Admin', 'Supervisor', 'Manager'] },
     { id: 'reports',     label: 'Laporan Harian',  icon: FileText,        roles: ['Admin', 'Auditor', 'Supervisor', 'Manager'] },
+    { id: 'daily_log',   label: 'Catatan Harian',  icon: BookOpen,        roles: ['Supervisor', 'Manager'] },
     { id: 'visits',      label: 'Kunjungan',        icon: MapPin,          roles: ['Admin', 'Auditor', 'Supervisor', 'Manager'] },
     { id: 'archive',     label: 'Arsip PT',         icon: Archive,         roles: ['Admin', 'Supervisor', 'Manager', 'Auditor'] },
     { id: 'progress',    label: 'Progress Audit',  icon: BarChart2,       roles: ['Admin', 'Supervisor', 'Manager'] },
+    { id: 'monitor',     label: 'Monitor Laporan', icon: BarChart2,       roles: ['Admin'] },
     { id: 'users',       label: 'User Management', icon: UserCog,         roles: ['Admin'] },
     { id: 'settings',    label: 'Pengaturan',       icon: Settings,        roles: ['Admin', 'Auditor', 'Supervisor', 'Manager'] },
   ].filter(n => n.roles.includes(user.role));
@@ -4733,9 +5839,11 @@ export default function App() {
                     {activeTab === 'pts'         && <PTManagement />}
                     {activeTab === 'assignments' && <AuditAssignments />}
                     {activeTab === 'reports'     && <DailyReports />}
+                    {activeTab === 'daily_log'   && <SpvDailyLog />}
                     {activeTab === 'visits'      && <VisitLogs />}
                     {activeTab === 'archive'     && <PTArchive />}
                     {activeTab === 'progress'    && <ProgressMonitoring />}
+                    {activeTab === 'monitor'     && <ReportMonitor />}
                     {activeTab === 'users'       && <UserManagement />}
                     {activeTab === 'settings'    && <AccountSettings />}
                   </motion.div>

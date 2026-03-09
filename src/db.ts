@@ -47,6 +47,25 @@ export function initDb() {
   try { db.exec('ALTER TABLE users ADD COLUMN kode_unik TEXT'); } catch { /* sudah ada */ }
   try { db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_kode_unik ON users(kode_unik)'); } catch { /* sudah ada */ }
 
+  // Migration: supervisor_id — assign Auditor ke SPV tertentu
+  try { db.exec('ALTER TABLE users ADD COLUMN supervisor_id INTEGER REFERENCES users(id)'); } catch { /* sudah ada */ }
+
+  // SPV / Manager Daily Log — catatan harian bebas, tidak terikat PT
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS spv_daily_reports (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id    INTEGER NOT NULL REFERENCES users(id),
+      tanggal    TEXT NOT NULL,
+      judul      TEXT NOT NULL,
+      isi        TEXT NOT NULL,
+      kegiatan   TEXT DEFAULT '',
+      kendala    TEXT DEFAULT '',
+      rencana    TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now','localtime')),
+      updated_at TEXT DEFAULT (datetime('now','localtime'))
+    )
+  `);
+
   // Generate kode_unik untuk user yang belum punya (user lama / baru sebelum migrasi)
   const CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // tanpa 0/O/1/I yang membingungkan
   function makeKode(): string {

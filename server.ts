@@ -199,25 +199,41 @@ async function startServer() {
     const users = (db.prepare(`
       SELECT u.id, u.username, u.full_name, r.name as role, u.is_active,
              COALESCE(u.email, '') as email,
-             COALESCE(u.kode_unik, '') as kode_unik
-      FROM users u JOIN roles r ON u.role_id = r.id
+             COALESCE(u.kode_unik, '') as kode_unik,
+             u.supervisor_id,
+             spv.full_name as supervisor_name
+      FROM users u
+      JOIN roles r ON u.role_id = r.id
+      LEFT JOIN users spv ON u.supervisor_id = spv.id
       ORDER BY r.name, u.full_name
     `).all() as any[]).map(u => ({ ...u, is_active: u.is_active === 1 || u.is_active === true }));
     res.json(users);
   });
 
-  app.get("/api/auditors", requireAuth, (_req: Request, res: Response) => {
-    const auditors = db.prepare(`
+  // GET /api/supervisors — daftar supervisor aktif untuk dropdown
+  app.get("/api/supervisors", requireAuth, (_req: Request, res: Response) => {
+    const supervisors = db.prepare(`
       SELECT u.id, u.full_name
       FROM users u JOIN roles r ON u.role_id = r.id
+      WHERE r.name = 'Supervisor' AND u.is_active = 1
+      ORDER BY u.full_name
+    `).all();
+    res.json(supervisors);
+  });
+
+  app.get("/api/auditors", requireAuth, (_req: Request, res: Response) => {
+    const auditors = db.prepare(`
+      SELECT u.id, u.full_name, u.supervisor_id
+      FROM users u JOIN roles r ON u.role_id = r.id
       WHERE r.name = 'Auditor' AND u.is_active = 1
+      ORDER BY u.full_name
     `).all();
     res.json(auditors);
   });
 
   // POST /api/users — buat akun baru (Admin only)
   app.post("/api/users", requireAuth, requireRole("Admin"), async (req: Request, res: Response) => {
-    const { username, password, full_name, role, email } = req.body;
+    const { username, password, full_name, role, email, supervisor_id } = req.body;
     if (!username || !full_name || !role) {
       return res.status(400).json({ error: "Nama, username, dan role wajib diisi" });
     }
@@ -251,15 +267,16 @@ async function startServer() {
     const hashed = await bcrypt.hash(finalPassword, 10);
     const kodeUnik = uniqueKodeUnik();
     const finalEmail = email ? email.trim().toLowerCase() : null;
+    const finalSpvId = (isAuditor && supervisor_id) ? Number(supervisor_id) : null;
     const result = db.prepare(
-      "INSERT INTO users (username, password, full_name, role_id, is_active, kode_unik, email) VALUES (?, ?, ?, ?, 1, ?, ?)"
-    ).run(username, hashed, full_name, roleRow.id, kodeUnik, finalEmail);
-    res.status(201).json({ id: result.lastInsertRowid, username, full_name, role, kode_unik: kodeUnik, email: finalEmail });
+      "INSERT INTO users (username, password, full_name, role_id, is_active, kode_unik, email, supervisor_id) VALUES (?, ?, ?, ?, 1, ?, ?, ?)"
+    ).run(username, hashed, full_name, roleRow.id, kodeUnik, finalEmail, finalSpvId);
+    res.status(201).json({ id: result.lastInsertRowid, username, full_name, role, kode_unik: kodeUnik, email: finalEmail, supervisor_id: finalSpvId });
   });
 
   // PATCH /api/users/:id — edit data user (Admin only)
   app.patch("/api/users/:id", requireAuth, requireRole("Admin"), (req: Request, res: Response) => {
-    const { full_name, role, is_active, email } = req.body;
+    const { full_name, role, is_active, email, supervisor_id } = req.body;
     const existing = db.prepare("SELECT id, role_id FROM users WHERE id = ?").get(req.params.id) as any;
     if (!existing) return res.status(404).json({ error: "User tidak ditemukan" });
     if (role) {
@@ -276,12 +293,16 @@ async function startServer() {
     // Update email jika dikirim (boleh dikosongkan untuk hapus email)
     if (email !== undefined) {
       const trimmed = email ? email.trim().toLowerCase() : null;
-      // Cek duplikat email (kecuali user itu sendiri)
       if (trimmed) {
         const emailExists = db.prepare("SELECT id FROM users WHERE email = ? AND id != ?").get(trimmed, req.params.id);
         if (emailExists) return res.status(409).json({ error: "Email sudah digunakan oleh user lain" });
       }
       db.prepare("UPDATE users SET email = ? WHERE id = ?").run(trimmed, req.params.id);
+    }
+    // Update supervisor_id — null untuk hapus assignment
+    if (supervisor_id !== undefined) {
+      const spvId = supervisor_id ? Number(supervisor_id) : null;
+      db.prepare("UPDATE users SET supervisor_id = ? WHERE id = ?").run(spvId, req.params.id);
     }
     res.json({ success: true });
   });
@@ -401,7 +422,7 @@ async function startServer() {
 
     const reports = roleRow.name === "Auditor"
       ? db.prepare(`
-          SELECT r.*, p.nama_pt, u.full_name as auditor_name
+          SELECT r.*, p.nama_pt, u.full_name as auditor_name, a.auditor_id
           FROM daily_reports r
           JOIN audit_assignments a ON r.assignment_id = a.id
           JOIN pts p ON a.pt_id = p.id
@@ -410,7 +431,7 @@ async function startServer() {
           ORDER BY r.tanggal DESC, r.created_at DESC
         `).all(currentUser.id)
       : db.prepare(`
-          SELECT r.*, p.nama_pt, u.full_name as auditor_name
+          SELECT r.*, p.nama_pt, u.full_name as auditor_name, a.auditor_id
           FROM daily_reports r
           JOIN audit_assignments a ON r.assignment_id = a.id
           JOIN pts p ON a.pt_id = p.id
@@ -793,6 +814,73 @@ async function startServer() {
     if (!pt) return res.status(404).json({ error: "PT tidak ditemukan di arsip" });
     db.prepare("UPDATE pts SET status = 'Active', archived_at = NULL WHERE id = ?")
       .run(req.params.id);
+    res.json({ success: true });
+  });
+
+  // ─── SPV / Manager Daily Log ─────────────────────────────────────────────────
+  app.get("/api/spv-reports", requireAuth, requireRole("Supervisor", "Manager", "Admin"), (req: Request, res: Response) => {
+    const currentUser = (req as any).currentUser;
+    const roleRow = db.prepare("SELECT name FROM roles WHERE id = ?").get(currentUser.role_id) as any;
+    const isAdmin = roleRow?.name === "Admin";
+    const rows = isAdmin
+      ? db.prepare(`
+          SELECT r.*, u.full_name AS author_name, ro.name AS author_role
+          FROM spv_daily_reports r
+          JOIN users u ON r.user_id = u.id
+          JOIN roles ro ON u.role_id = ro.id
+          ORDER BY r.tanggal DESC, r.created_at DESC
+        `).all()
+      : db.prepare(`
+          SELECT r.*, u.full_name AS author_name, ro.name AS author_role
+          FROM spv_daily_reports r
+          JOIN users u ON r.user_id = u.id
+          JOIN roles ro ON u.role_id = ro.id
+          WHERE r.user_id = ?
+          ORDER BY r.tanggal DESC, r.created_at DESC
+        `).all(currentUser.id);
+    res.json(rows);
+  });
+
+  app.post("/api/spv-reports", requireAuth, requireRole("Supervisor", "Manager"), (req: Request, res: Response) => {
+    const { tanggal, judul, isi, kegiatan, kendala, rencana } = req.body;
+    if (!judul?.trim() || !isi?.trim()) {
+      return res.status(400).json({ error: "Judul dan isi wajib diisi" });
+    }
+    const currentUser = (req as any).currentUser;
+    const result = db.prepare(`
+      INSERT INTO spv_daily_reports (user_id, tanggal, judul, isi, kegiatan, kendala, rencana)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      currentUser.id,
+      tanggal || new Date().toISOString().split("T")[0],
+      judul.trim(), isi.trim(),
+      kegiatan?.trim() || "", kendala?.trim() || "", rencana?.trim() || ""
+    );
+    res.status(201).json({ id: result.lastInsertRowid });
+  });
+
+  app.patch("/api/spv-reports/:id", requireAuth, requireRole("Supervisor", "Manager"), (req: Request, res: Response) => {
+    const currentUser = (req as any).currentUser;
+    const existing = db.prepare("SELECT id FROM spv_daily_reports WHERE id = ? AND user_id = ?").get(req.params.id, currentUser.id);
+    if (!existing) return res.status(404).json({ error: "Catatan tidak ditemukan atau bukan milik Anda" });
+    const { tanggal, judul, isi, kegiatan, kendala, rencana } = req.body;
+    if (!judul?.trim() || !isi?.trim()) {
+      return res.status(400).json({ error: "Judul dan isi wajib diisi" });
+    }
+    db.prepare(`
+      UPDATE spv_daily_reports
+      SET tanggal = ?, judul = ?, isi = ?, kegiatan = ?, kendala = ?, rencana = ?,
+          updated_at = datetime('now','localtime')
+      WHERE id = ?
+    `).run(tanggal, judul.trim(), isi.trim(), kegiatan?.trim() || "", kendala?.trim() || "", rencana?.trim() || "", req.params.id);
+    res.json({ success: true });
+  });
+
+  app.delete("/api/spv-reports/:id", requireAuth, requireRole("Supervisor", "Manager"), (req: Request, res: Response) => {
+    const currentUser = (req as any).currentUser;
+    const existing = db.prepare("SELECT id FROM spv_daily_reports WHERE id = ? AND user_id = ?").get(req.params.id, currentUser.id);
+    if (!existing) return res.status(404).json({ error: "Catatan tidak ditemukan atau bukan milik Anda" });
+    db.prepare("DELETE FROM spv_daily_reports WHERE id = ?").run(req.params.id);
     res.json({ success: true });
   });
 
