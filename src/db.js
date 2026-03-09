@@ -8,7 +8,7 @@ const pool = mysql.createPool({
     stream: () => net.connect({ host: '127.0.0.1', port: 3306, family: 4 }),
     database: process.env.DB_NAME || 'u846640655_dbmonit',
     user: process.env.DB_USER || 'u846640655_usermonit',
-    password: process.env.DB_PASS || 'MonITRA2026!',
+    password: process.env.DB_PASS || 'Monitra2026',
     waitForConnections: true,
     connectionLimit: 10,
     charset: 'utf8mb4',
