@@ -30,15 +30,6 @@ process.on("unhandledRejection", (reason) => {
 });
 writeLog("Starting MONITRA server...");
 writeLog(`NODE_ENV=${process.env.NODE_ENV}, DB_PATH=${process.env.DB_PATH || "(default)"}, __dirname=${__dirname}`);
-// Initialize Database (sql.js init is async)
-try {
-    await initDb();
-    writeLog("Database initialized OK");
-}
-catch (err) {
-    writeLog(`DB INIT FAILED: ${err.stack || err.message}`);
-    process.exit(1);
-}
 // ─── KODE UNIK HELPER ─────────────────────────────────────────────────────────
 const KODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // tanpa 0/O/1/I yang membingungkan
 function generateKodeUnik() {
@@ -1104,4 +1095,13 @@ async function startServer() {
         console.log(`[MONITRA] Daily reminder selesai: ${auditors.length} auditor belum laporan`);
     }, { timezone: "Asia/Jakarta" });
 }
-startServer();
+// Initialize DB (async/WASM) then start server — NO top-level await so require() works
+initDb()
+    .then(() => {
+    writeLog("Database initialized OK");
+    return startServer();
+})
+    .catch((err) => {
+    writeLog(`STARTUP FAILED: ${err.stack || err.message}`);
+    process.exit(1);
+});
