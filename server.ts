@@ -8,12 +8,37 @@ import nodemailer from "nodemailer";
 import cron from "node-cron";
 import path from "path";
 import { fileURLToPath } from "url";
+import fs from "fs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ─── STARTUP ERROR LOGGING ────────────────────────────────────────────────────
+const logFile = path.join(__dirname, "startup.log");
+function writeLog(msg: string) {
+  const line = `[${new Date().toISOString()}] ${msg}\n`;
+  process.stdout.write(line);
+  try { fs.appendFileSync(logFile, line); } catch {}
+}
+process.on("uncaughtException", (err) => {
+  writeLog(`UNCAUGHT: ${err.stack || err.message}`);
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason: any) => {
+  writeLog(`UNHANDLED REJECTION: ${reason?.stack || reason}`);
+});
+
+writeLog("Starting MONITRA server...");
+writeLog(`NODE_ENV=${process.env.NODE_ENV}, DB_PATH=${process.env.DB_PATH || "(default)"}, __dirname=${__dirname}`);
+
 // Initialize Database
-initDb();
+try {
+  initDb();
+  writeLog("Database initialized OK");
+} catch (err: any) {
+  writeLog(`DB INIT FAILED: ${err.stack || err.message}`);
+  process.exit(1);
+}
 
 // ─── KODE UNIK HELPER ─────────────────────────────────────────────────────────
 const KODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // tanpa 0/O/1/I yang membingungkan
