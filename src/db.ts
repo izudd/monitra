@@ -7,7 +7,7 @@ const pool = mysql.createPool({
   socketPath: process.env.DB_SOCKET || '/var/lib/mysql/mysql.sock',
   database:   process.env.DB_NAME   || 'u846640655_dbmonit',
   user:       process.env.DB_USER   || 'u846640655_usermonit',
-  password:   process.env.DB_PASS   || 'fM@0U|^5s|w',
+  password:   process.env.DB_PASS   || 'MonITRA2026!',
   waitForConnections: true,
   connectionLimit:    10,
   charset:            'utf8mb4',
