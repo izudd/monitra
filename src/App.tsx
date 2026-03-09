@@ -4106,6 +4106,8 @@ const UserManagement = () => {
   const [open, setOpen]             = useState(false);
   const [editUser, setEditUser]     = useState<any | null>(null);
   const [pwModal, setPwModal]       = useState<any | null>(null); // user target reset pw
+  const [deleteConfirm, setDeleteConfirm] = useState<any | null>(null); // user target delete
+  const [deleting, setDeleting]     = useState(false);
   const [saving, setSaving]         = useState(false);
   const [showPw, setShowPw]         = useState(false);
 
@@ -4203,6 +4205,23 @@ const UserManagement = () => {
       toast(`Kode Unik baru: ${data.kode_unik}`, 'success');
       load();
     } catch (e: any) { toast(e.message, 'error'); }
+  };
+
+  // Hapus user permanen
+  const deleteUser = async () => {
+    if (!deleteConfirm) return;
+    setDeleting(true);
+    try {
+      const r = await apiFetch(`/api/users/${deleteConfirm.id}`, me?.id, { method: 'DELETE' });
+      if (!r.ok) { const err = await r.json(); throw new Error(err.error || 'Gagal menghapus user'); }
+      toast(`User "${deleteConfirm.full_name}" berhasil dihapus`, 'success');
+      setDeleteConfirm(null);
+      load();
+    } catch (e: any) {
+      toast(e.message, 'error');
+    } finally {
+      setDeleting(false);
+    }
   };
 
   // Reset password oleh Admin
@@ -4358,6 +4377,14 @@ const UserManagement = () => {
                     {u.is_active ? <><UserX size={12} /> Nonaktifkan</> : <><UserCheck size={12} /> Aktifkan</>}
                   </button>
                 )}
+                {/* Hapus permanen — tidak bisa hapus diri sendiri */}
+                {u.id !== me?.id && (
+                  <button onClick={() => setDeleteConfirm(u)}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 12px', borderRadius: 6, background: '#fff1f2', border: '1px solid #fecdd3', color: '#be123c', fontWeight: 500, fontSize: 12, cursor: 'pointer', transition: 'background 0.15s' }}
+                    title="Hapus user permanen">
+                    <Trash2 size={12} /> Hapus
+                  </button>
+                )}
               </div>
             </td>
           </tr>
@@ -4489,6 +4516,60 @@ const UserManagement = () => {
                   </button>
                 </div>
               </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ── Modal Konfirmasi Hapus User ── */}
+      <AnimatePresence>
+        {deleteConfirm && (
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
+            onClick={() => !deleting && setDeleteConfirm(null)}>
+            <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }}
+              style={{ background: T.white, borderRadius: 14, padding: 28, width: '100%', maxWidth: 420, boxShadow: '0 20px 60px rgba(0,0,0,0.18)' }}
+              onClick={e => e.stopPropagation()}>
+              {/* Icon peringatan */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 16 }}>
+                <div style={{ width: 44, height: 44, borderRadius: 12, background: '#fff1f2', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <Trash2 size={20} style={{ color: '#be123c' }} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: T.gray900 }}>Hapus User Permanen?</div>
+                  <div style={{ fontSize: 12, color: T.gray500, marginTop: 2 }}>Tindakan ini tidak dapat dibatalkan</div>
+                </div>
+              </div>
+
+              {/* Info user */}
+              <div style={{ background: T.gray50, border: `1px solid ${T.gray200}`, borderRadius: 8, padding: '12px 14px', marginBottom: 18 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <div style={{ width: 36, height: 36, borderRadius: 8, background: '#be123c', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, fontWeight: 700, color: T.white, flexShrink: 0 }}>
+                    {deleteConfirm.full_name.charAt(0)}
+                  </div>
+                  <div>
+                    <div style={{ fontWeight: 600, color: T.gray900, fontSize: 13 }}>{deleteConfirm.full_name}</div>
+                    <div style={{ fontSize: 12, color: T.gray500, fontFamily: MONO }}>@{deleteConfirm.username} · {deleteConfirm.role}</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Peringatan */}
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '10px 12px', borderRadius: 8, background: '#fff7ed', border: '1px solid #fed7aa', marginBottom: 20 }}>
+                <AlertTriangle size={14} style={{ color: '#c2410c', flexShrink: 0, marginTop: 1 }} />
+                <div style={{ fontSize: 12, color: '#c2410c', lineHeight: 1.5 }}>
+                  User dengan <strong>assignments, laporan, atau visit log</strong> tidak dapat dihapus.<br />
+                  Gunakan <strong>Nonaktifkan</strong> jika user masih memiliki data terkait.
+                </div>
+              </div>
+
+              {/* Tombol */}
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <BtnSecondary onClick={() => setDeleteConfirm(null)} disabled={deleting}>Batal</BtnSecondary>
+                <button onClick={deleteUser} disabled={deleting}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '8px 18px', borderRadius: 8, background: deleting ? '#fda4af' : '#be123c', border: 'none', color: T.white, fontWeight: 600, fontSize: 13, cursor: deleting ? 'not-allowed' : 'pointer', transition: 'background 0.15s' }}>
+                  <Trash2 size={13} /> {deleting ? 'Menghapus...' : 'Ya, Hapus Permanen'}
+                </button>
+              </div>
             </motion.div>
           </div>
         )}

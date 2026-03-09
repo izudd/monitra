@@ -364,6 +364,36 @@ async function startServer() {
     res.json({ kode_unik: kodeUnik });
   });
 
+  app.delete("/api/users/:id", requireAuth, requireRole("Admin"), (req: Request, res: Response) => {
+    const id = Number(req.params.id);
+    const existing = db.prepare("SELECT id, username FROM users WHERE id = ?").get(id) as any;
+    if (!existing) return res.status(404).json({ error: "User tidak ditemukan" });
+
+    // Cegah hapus akun sendiri
+    const reqUserId = (req as any).userId;
+    if (Number(reqUserId) === id) {
+      return res.status(400).json({ error: "Tidak dapat menghapus akun sendiri" });
+    }
+
+    // Cek relasi — jika ada assignment atau laporan, tolak hapus permanen
+    const hasAssignments = db.prepare("SELECT id FROM audit_assignments WHERE auditor_id = ? LIMIT 1").get(id);
+    const hasReports     = db.prepare("SELECT id FROM spv_daily_reports WHERE user_id = ? LIMIT 1").get(id);
+    const hasVisitLogs   = db.prepare("SELECT id FROM visit_logs WHERE auditor_id = ? LIMIT 1").get(id);
+
+    if (hasAssignments || hasReports || hasVisitLogs) {
+      return res.status(400).json({
+        error: "User memiliki data terkait (assignments / laporan / visit log). Gunakan fitur Nonaktifkan sebagai gantinya."
+      });
+    }
+
+    // Hapus data relasi yang aman dihapus
+    db.prepare("DELETE FROM notifications WHERE user_id = ?").run(id);
+
+    // Hapus user
+    db.prepare("DELETE FROM users WHERE id = ?").run(id);
+    res.json({ success: true });
+  });
+
   // ─── PROTECTED: PTs ──────────────────────────────────────────────────────
   app.get("/api/pts", requireAuth, (_req: Request, res: Response) => {
     // Hanya tampilkan PT yang belum diarsipkan — PT Archived punya endpoint sendiri
