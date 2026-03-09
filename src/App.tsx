@@ -5383,16 +5383,27 @@ export default function App() {
   const [wsConnected, setWsConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
+  const wsRetryRef = useRef(0);
   const connectWS = useCallback((userId: number) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
-    const ws = new WebSocket(`ws://${window.location.hostname}:3000/ws`);
+    // Use same host as current page (no hardcoded :3000) — works on localhost AND Hostinger
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${proto}://${window.location.host}/ws`);
     wsRef.current = ws;
     ws.onopen = () => {
       setWsConnected(true);
+      wsRetryRef.current = 0;
       // Daftarkan userId ke server supaya notifikasi bisa dikirim secara targeted
       ws.send(JSON.stringify({ type: 'AUTH', userId }));
     };
-    ws.onclose = () => { setWsConnected(false); setTimeout(() => connectWS(userId), 3000); };
+    ws.onclose = () => {
+      setWsConnected(false);
+      // Max 5 retries — stops if host doesn't support WebSocket
+      if (wsRetryRef.current < 5) {
+        wsRetryRef.current++;
+        setTimeout(() => connectWS(userId), Math.min(3000 * wsRetryRef.current, 15000));
+      }
+    };
     ws.onerror = () => ws.close();
     ws.onmessage = (e) => {
       try {
