@@ -1,9 +1,11 @@
 import mysql from 'mysql2/promise';
 import bcrypt from 'bcryptjs';
+import net from 'net';
 // ─── CONNECTION POOL ──────────────────────────────────────────────────────────
-// Gunakan Unix socket agar MySQL tidak cek IPv6 (bypass ::1 vs localhost issue)
+// Force IPv4 TCP so MySQL sees connection as @'127.0.0.1' (matches user grant)
+// Using stream factory: net.connect({ family: 4 }) bypasses Node.js IPv6 preference
 const pool = mysql.createPool({
-    socketPath: process.env.DB_SOCKET || '/var/lib/mysql/mysql.sock',
+    stream: () => net.connect({ host: '127.0.0.1', port: 3306, family: 4 }),
     database: process.env.DB_NAME || 'u846640655_dbmonit',
     user: process.env.DB_USER || 'u846640655_usermonit',
     password: process.env.DB_PASS || 'MonITRA2026!',
