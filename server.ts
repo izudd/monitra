@@ -550,20 +550,39 @@ async function startServer() {
 
   app.post("/api/reports", requireAuth, requireRole("Auditor", "Supervisor", "Manager"), async (req: Request, res: Response) => {
     const {
-      assignment_id, tanggal, jam_mulai, jam_selesai,
+      assignment_id, pt_id, tanggal, jam_mulai, jam_selesai,
       area_diaudit, deskripsi_pekerjaan, temuan, progress, kendala, status
     } = req.body;
 
-    if (!assignment_id || !jam_mulai || !jam_selesai || !area_diaudit || !deskripsi_pekerjaan) {
+    if (!jam_mulai || !jam_selesai || !area_diaudit || !deskripsi_pekerjaan) {
       return res.status(400).json({ error: "Field wajib belum lengkap" });
     }
 
     const currentUser = (req as any).currentUser;
-    const assignment = await db.prepare(
-      "SELECT id FROM audit_assignments WHERE id = ? AND auditor_id = ?"
-    ).get(assignment_id, currentUser.id);
-    if (!assignment) {
-      return res.status(403).json({ error: "Assignment tidak valid atau bukan milik Anda" });
+    const roleRow = await db.prepare("SELECT name FROM roles WHERE id = ?").get(currentUser.role_id) as any;
+    const isSPV = roleRow?.name === 'Supervisor' || roleRow?.name === 'Manager';
+
+    let finalAssignmentId = assignment_id;
+
+    if (isSPV) {
+      // SPV/Manager memilih PT langsung — cari assignment aktif untuk PT tersebut
+      if (!pt_id) return res.status(400).json({ error: "PT wajib dipilih" });
+      const assignment = await db.prepare(
+        "SELECT id FROM audit_assignments WHERE pt_id = ? AND status = 'Active' LIMIT 1"
+      ).get(pt_id) as any;
+      if (!assignment) {
+        return res.status(400).json({ error: "Belum ada auditor yang ditugaskan ke PT ini. Buat penugasan terlebih dahulu." });
+      }
+      finalAssignmentId = assignment.id;
+    } else {
+      // Auditor: pastikan assignment miliknya
+      if (!assignment_id) return res.status(400).json({ error: "Penugasan wajib dipilih" });
+      const assignment = await db.prepare(
+        "SELECT id FROM audit_assignments WHERE id = ? AND auditor_id = ?"
+      ).get(assignment_id, currentUser.id);
+      if (!assignment) {
+        return res.status(403).json({ error: "Assignment tidak valid atau bukan milik Anda" });
+      }
     }
 
     const result = await db.prepare(`
@@ -572,7 +591,7 @@ async function startServer() {
         deskripsi_pekerjaan, temuan, progress, kendala, status
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      assignment_id,
+      finalAssignmentId,
       tanggal || new Date().toISOString().split("T")[0],
       jam_mulai, jam_selesai, area_diaudit,
       deskripsi_pekerjaan, temuan || "", progress || 0, kendala || "", status || "Ongoing"

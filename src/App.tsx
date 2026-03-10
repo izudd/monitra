@@ -2347,12 +2347,15 @@ const DailyReports = () => {
   const [collapsedPTs, setCollapsedPTs] = useState<Set<string>>(new Set());
   const [collapsedAuditors, setCollapsedAuditors] = useState<Set<string>>(new Set());
 
+  const isSPV = user?.role === 'Supervisor' || user?.role === 'Manager';
+
   const initForm = {
-    assignment_id: '', tanggal: new Date().toISOString().split('T')[0],
+    assignment_id: '', pt_id: '', tanggal: new Date().toISOString().split('T')[0],
     jam_mulai: '', jam_selesai: '', area_diaudit: '',
     deskripsi_pekerjaan: '', temuan: '', progress: 0, kendala: '', status: 'Ongoing'
   };
   const [form, setForm] = useState(initForm);
+  const [spvPts, setSpvPts] = useState<any[]>([]);
   const f = (k: string) => (e: any) => setForm(p => ({ ...p, [k]: e.target.value }));
 
   // ── Draft Auto-Save ──────────────────────────────────────────────────────────
@@ -2401,15 +2404,18 @@ const DailyReports = () => {
 
   const load = useCallback(async () => {
     try {
-      const [r, a] = await Promise.all([
+      const fetches: Promise<any>[] = [
         apiFetch('/api/reports', user?.id).then(r => { if (!r.ok) throw new Error(); return r.json(); }),
         user?.role === 'Auditor'
           ? apiFetch(`/api/my-assignments/${user.id}`, user?.id).then(r => r.json())
-          : apiFetch('/api/assignments', user?.id).then(r => r.json())
-      ]);
+          : apiFetch('/api/assignments', user?.id).then(r => r.json()),
+      ];
+      if (isSPV) fetches.push(apiFetch('/api/pts', user?.id).then(r => r.json()));
+      const [r, a, p] = await Promise.all(fetches);
       setReports(r); setAssignments(a);
+      if (isSPV && p) setSpvPts(p);
     } catch { toast('Gagal memuat laporan', 'error'); }
-  }, [user?.id, user?.role]);
+  }, [user?.id, user?.role, isSPV]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -2418,7 +2424,11 @@ const DailyReports = () => {
   const submit = async (e: React.FormEvent) => {
     e.preventDefault(); setSaving(true);
     try {
-      const r = await apiFetch('/api/reports', user?.id, { method: 'POST', body: JSON.stringify(form) });
+      // SPV kirim pt_id, Auditor kirim assignment_id
+      const payload = isSPV
+        ? { ...form, assignment_id: undefined }
+        : { ...form, pt_id: undefined };
+      const r = await apiFetch('/api/reports', user?.id, { method: 'POST', body: JSON.stringify(payload) });
       if (!r.ok) { const err = await r.json(); throw new Error(err.error || 'Gagal mengirim laporan'); }
       toast('Laporan berhasil dikirim', 'success');
       // Hapus draft setelah laporan berhasil terkirim
@@ -2964,14 +2974,23 @@ const DailyReports = () => {
       <Modal open={open} onClose={closeModal} title="Buat Laporan Harian" subtitle="Isi aktivitas audit hari ini" wide>
         <form onSubmit={submit}>
           <Field label="PT / Penugasan">
-            <Select required value={form.assignment_id} onChange={f('assignment_id')}>
-              <option value="">-- Pilih PT yang sedang diaudit --</option>
-              {assignments.map((a: any) => (
-                <option key={a.id} value={a.id}>
-                  {isAuditor ? a.nama_pt : `${a.nama_pt} — ${a.auditor_name || 'Unknown'}`}
-                </option>
-              ))}
-            </Select>
+            {isSPV ? (
+              // SPV & Manager: tampilkan semua PT aktif
+              <Select required value={form.pt_id} onChange={f('pt_id')}>
+                <option value="">-- Pilih PT --</option>
+                {spvPts.map((p: any) => (
+                  <option key={p.id} value={p.id}>{p.nama_pt}</option>
+                ))}
+              </Select>
+            ) : (
+              // Auditor: tampilkan assignment miliknya
+              <Select required value={form.assignment_id} onChange={f('assignment_id')}>
+                <option value="">-- Pilih PT yang sedang diaudit --</option>
+                {assignments.map((a: any) => (
+                  <option key={a.id} value={a.id}>{a.nama_pt}</option>
+                ))}
+              </Select>
+            )}
           </Field>
           <Field label="Tanggal Laporan"><Input required type="date" value={form.tanggal} onChange={f('tanggal')} /></Field>
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
