@@ -364,6 +364,33 @@ async function startServer() {
     `).run(nama_pt, alamat || "", PIC, periode_start, periode_end);
         res.status(201).json({ id: result.lastInsertRowid });
     });
+    // ─── INTERNAL: Sync PT dari IMDACS (pakai API key, tanpa user auth) ─────────
+    const SYNC_SECRET = process.env.SYNC_SECRET || 'imdacs-monitra-sync-2026';
+    app.post("/api/internal/sync-pt", async (req, res) => {
+        try {
+            if (req.headers['x-sync-key'] !== SYNC_SECRET) {
+                return res.status(401).json({ error: 'Unauthorized' });
+            }
+            const { nama_pt, alamat, PIC, periode_start, periode_end } = req.body;
+            if (!nama_pt)
+                return res.status(400).json({ error: 'nama_pt wajib diisi' });
+            // Jika PT dengan nama sama sudah ada (non-archived), skip
+            const existing = await db.prepare("SELECT id FROM pts WHERE nama_pt = ? AND status != 'Archived'").get(nama_pt);
+            if (existing) {
+                return res.json({ id: existing.id, message: 'PT sudah ada, skip' });
+            }
+            const result = await db.prepare(`
+        INSERT INTO pts (nama_pt, alamat, PIC, periode_start, periode_end)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(nama_pt, alamat || '', PIC || '', periode_start || null, periode_end || null);
+            console.log(`[SYNC] PT baru dari IMDACS: ${nama_pt}`);
+            res.status(201).json({ id: result.lastInsertRowid, message: 'PT berhasil dibuat' });
+        }
+        catch (err) {
+            console.error('[SYNC] Error:', err.message);
+            res.status(500).json({ error: err.message });
+        }
+    });
     app.patch("/api/pts/:id", requireAuth, requireRole("Admin", "Supervisor", "Manager"), async (req, res) => {
         const { nama_pt, alamat, PIC, periode_start, periode_end, status } = req.body;
         const existing = await db.prepare("SELECT id FROM pts WHERE id = ?").get(req.params.id);
