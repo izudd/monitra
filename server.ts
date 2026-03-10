@@ -235,13 +235,26 @@ async function startServer() {
     res.json(supervisors);
   });
 
-  app.get("/api/auditors", requireAuth, async (_req: Request, res: Response) => {
-    const auditors = await db.prepare(`
-      SELECT u.id, u.full_name, u.supervisor_id
-      FROM users u JOIN roles r ON u.role_id = r.id
-      WHERE r.name = 'Auditor' AND u.is_active = 1
-      ORDER BY u.full_name
-    `).all();
+  app.get("/api/auditors", requireAuth, async (req: Request, res: Response) => {
+    const currentUser = (req as any).currentUser;
+    const roleRow = await db.prepare("SELECT name FROM roles WHERE id = ?").get(currentUser.role_id) as any;
+
+    // Supervisor hanya lihat auditor miliknya sendiri (supervisor_id = currentUser.id)
+    // Admin & Manager lihat semua auditor
+    const auditors = roleRow?.name === 'Supervisor'
+      ? await db.prepare(`
+          SELECT u.id, u.full_name, u.supervisor_id
+          FROM users u JOIN roles r ON u.role_id = r.id
+          WHERE r.name = 'Auditor' AND u.is_active = 1 AND u.supervisor_id = ?
+          ORDER BY u.full_name
+        `).all(currentUser.id)
+      : await db.prepare(`
+          SELECT u.id, u.full_name, u.supervisor_id
+          FROM users u JOIN roles r ON u.role_id = r.id
+          WHERE r.name = 'Auditor' AND u.is_active = 1
+          ORDER BY u.full_name
+        `).all();
+
     res.json(auditors);
   });
 
