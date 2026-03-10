@@ -1915,9 +1915,25 @@ const PTManagement = () => {
   // Buka modal tambah
   const openAdd = () => { resetModal(); setOpen(true); };
 
+  // Normalise date dari MySQL: bisa "2025-01-01T00:00:00.000Z" atau "2025-01-01"
+  // <input type="date"> butuh format YYYY-MM-DD
+  const toDateStr = (v: any): string => {
+    if (!v) return '';
+    if (typeof v === 'string') return v.slice(0, 10);
+    if (v instanceof Date) return v.toISOString().slice(0, 10);
+    return '';
+  };
+
   // Buka modal edit
   const openEdit = (pt: PT) => {
-    setForm({ nama_pt: pt.nama_pt, alamat: pt.alamat, PIC: pt.PIC, periode_start: pt.periode_start, periode_end: pt.periode_end, status: pt.status });
+    setForm({
+      nama_pt: pt.nama_pt,
+      alamat: pt.alamat,
+      PIC: pt.PIC,
+      periode_start: toDateStr(pt.periode_start),
+      periode_end:   toDateStr(pt.periode_end),
+      status: pt.status,
+    });
     setEditPT(pt); setAssignmentEntries([]); setNewEntry(initEntry); setOpen(true);
   };
 
