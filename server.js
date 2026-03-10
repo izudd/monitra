@@ -369,6 +369,10 @@ async function startServer() {
         if (!nama_pt || !PIC) {
             return res.status(400).json({ error: "Nama PT dan PIC wajib diisi" });
         }
+        // Cek duplikat nama PT — case-insensitive (PT ABC = pt abc = Pt Abc)
+        const dup = await db.prepare("SELECT id FROM pts WHERE LOWER(nama_pt) = LOWER(?) AND status != 'Archived'").get(nama_pt);
+        if (dup)
+            return res.status(409).json({ error: `PT "${nama_pt}" sudah terdaftar` });
         const result = await db.prepare(`
       INSERT INTO pts (nama_pt, alamat, PIC, periode_start, periode_end)
       VALUES (?, ?, ?, ?, ?)
@@ -417,8 +421,8 @@ async function startServer() {
             const { nama_pt, alamat, PIC, periode_start, periode_end } = req.body;
             if (!nama_pt)
                 return res.status(400).json({ error: 'nama_pt wajib diisi' });
-            // Jika PT dengan nama sama sudah ada (non-archived), skip
-            const existing = await db.prepare("SELECT id FROM pts WHERE nama_pt = ? AND status != 'Archived'").get(nama_pt);
+            // Jika PT dengan nama sama sudah ada (non-archived), skip — case-insensitive
+            const existing = await db.prepare("SELECT id FROM pts WHERE LOWER(nama_pt) = LOWER(?) AND status != 'Archived'").get(nama_pt);
             if (existing) {
                 return res.json({ id: existing.id, message: 'PT sudah ada, skip' });
             }
@@ -461,6 +465,13 @@ async function startServer() {
         const { pt_id, auditor_id, start_date, end_date } = req.body;
         if (!pt_id || !auditor_id) {
             return res.status(400).json({ error: "PT dan Auditor wajib dipilih" });
+        }
+        // Cek duplikat: auditor yang sama sudah aktif di PT yang sama
+        const dup = await db.prepare("SELECT id FROM audit_assignments WHERE pt_id = ? AND auditor_id = ? AND status = 'Active'").get(pt_id, auditor_id);
+        if (dup) {
+            const auditor = await db.prepare("SELECT full_name FROM users WHERE id = ?").get(auditor_id);
+            const pt = await db.prepare("SELECT nama_pt FROM pts WHERE id = ?").get(pt_id);
+            return res.status(409).json({ error: `${auditor?.full_name || 'Auditor'} sudah ditugaskan ke ${pt?.nama_pt || 'PT ini'} (aktif)` });
         }
         const result = await db.prepare(`
       INSERT INTO audit_assignments (pt_id, auditor_id, start_date, end_date)

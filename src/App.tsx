@@ -1865,11 +1865,29 @@ const PTManagement = () => {
   const [saving,    setSaving]    = useState(false);
   const [importing, setImporting] = useState(false);
 
-  const load = useCallback(() => {
-    apiFetch('/api/pts', user?.id)
-      .then(r => { if (!r.ok) throw new Error('Gagal memuat data PT'); return r.json(); })
-      .then(setPts)
-      .catch(e => toast(e.message, 'error'));
+  // ── State untuk penugasan auditor (gabung di form tambah PT) ──────────────
+  const [auditorList, setAuditorList] = useState<any[]>([]);
+  const initEntry = { auditor_id: '', start_date: '', end_date: '' };
+  const [newEntry,          setNewEntry]          = useState(initEntry);
+  const [assignmentEntries, setAssignmentEntries] = useState<Array<{ auditor_id: string; auditor_name: string; start_date: string; end_date: string }>>([]);
+
+  const addAuditorEntry = () => {
+    if (!newEntry.auditor_id) return toast('Pilih auditor terlebih dahulu', 'error');
+    if (assignmentEntries.find(e => e.auditor_id === newEntry.auditor_id))
+      return toast('Auditor ini sudah ditambahkan', 'error');
+    const aud = auditorList.find((a: any) => String(a.id) === newEntry.auditor_id);
+    setAssignmentEntries(p => [...p, { ...newEntry, auditor_name: aud?.full_name || '' }]);
+    setNewEntry(initEntry);
+  };
+
+  const load = useCallback(async () => {
+    try {
+      const [p, a] = await Promise.all([
+        apiFetch('/api/pts', user?.id).then(r => { if (!r.ok) throw new Error('Gagal memuat data PT'); return r.json(); }),
+        apiFetch('/api/auditors', user?.id).then(r => r.json()),
+      ]);
+      setPts(p); setAuditorList(a);
+    } catch (e: any) { toast(e.message, 'error'); }
   }, [user?.id]);
 
   const importFromImdacs = async () => {
@@ -1889,17 +1907,18 @@ const PTManagement = () => {
 
   useEffect(() => { load(); }, [load]);
 
-  // Buka modal tambah
-  const openAdd = () => { setForm(initForm); setEditPT(null); setOpen(true); };
+  const resetModal = () => { setForm(initForm); setEditPT(null); setAssignmentEntries([]); setNewEntry(initEntry); };
 
-  // Buka modal edit — FIX #4
+  // Buka modal tambah
+  const openAdd = () => { resetModal(); setOpen(true); };
+
+  // Buka modal edit
   const openEdit = (pt: PT) => {
     setForm({ nama_pt: pt.nama_pt, alamat: pt.alamat, PIC: pt.PIC, periode_start: pt.periode_start, periode_end: pt.periode_end, status: pt.status });
-    setEditPT(pt);
-    setOpen(true);
+    setEditPT(pt); setAssignmentEntries([]); setNewEntry(initEntry); setOpen(true);
   };
 
-  const closeModal = () => { setOpen(false); setEditPT(null); setForm(initForm); }; // FIX #6 reset
+  const closeModal = () => { setOpen(false); resetModal(); };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1908,13 +1927,26 @@ const PTManagement = () => {
       const url = editPT ? `/api/pts/${editPT.id}` : '/api/pts';
       const method = editPT ? 'PATCH' : 'POST';
       const r = await apiFetch(url, user?.id, { method, body: JSON.stringify(form) });
-      if (!r.ok) {
-        const err = await r.json();
-        throw new Error(err.error || 'Gagal menyimpan data');
+      if (!r.ok) { const err = await r.json(); throw new Error(err.error || 'Gagal menyimpan data'); }
+      const ptData = await r.json();
+      const ptId = editPT ? editPT.id : ptData.id;
+
+      // Buat penugasan untuk setiap auditor yang dipilih
+      let ok = 0; const errors: string[] = [];
+      for (const entry of assignmentEntries) {
+        const ar = await apiFetch('/api/assignments', user?.id, {
+          method: 'POST',
+          body: JSON.stringify({ pt_id: ptId, auditor_id: entry.auditor_id, start_date: entry.start_date, end_date: entry.end_date }),
+        });
+        if (ar.ok) ok++;
+        else { const err = await ar.json(); errors.push(err.error || 'Gagal'); }
       }
-      toast(editPT ? 'PT berhasil diperbarui' : 'PT berhasil ditambahkan', 'success');
-      closeModal();
-      load();
+
+      const base = editPT ? 'PT berhasil diperbarui' : 'PT berhasil ditambahkan';
+      const extra = ok > 0 ? ` + ${ok} auditor ditugaskan` : '';
+      const warn  = errors.length > 0 ? ` (${errors.length} duplikat dilewati)` : '';
+      toast(base + extra + warn, errors.length > 0 ? 'error' : 'success');
+      closeModal(); load();
     } catch (e: any) {
       toast(e.message, 'error');
     } finally {
@@ -1971,9 +2003,50 @@ const PTManagement = () => {
               </Select>
             </Field>
           )}
+
+          {/* ── Tugaskan Auditor (hanya saat Tambah PT baru) ── */}
+          {!editPT && (
+            <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${T.gray100}` }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: T.gray700, marginBottom: 10 }}>
+                Tugaskan Auditor <span style={{ fontWeight: 400, color: T.gray400, fontSize: 12 }}>(opsional, bisa diisi setelah)</span>
+              </div>
+
+              {/* Daftar auditor yang sudah dipilih */}
+              {assignmentEntries.length > 0 && (
+                <div style={{ marginBottom: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {assignmentEntries.map((e, i) => (
+                    <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', background: '#eff6ff', borderRadius: 6, fontSize: 12, border: '1px solid #bfdbfe' }}>
+                      <span style={{ fontWeight: 600, flex: 1, color: T.gray800 }}>{e.auditor_name}</span>
+                      {e.start_date && <span style={{ color: T.gray500 }}>{e.start_date} s/d {e.end_date || '—'}</span>}
+                      <button type="button" onClick={() => setAssignmentEntries(p => p.filter((_, j) => j !== i))}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ef4444', fontWeight: 700, fontSize: 14, padding: '0 2px', lineHeight: 1 }}>✕</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Input tambah auditor */}
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                <div style={{ flex: 2, minWidth: 140 }}>
+                  <Select value={newEntry.auditor_id} onChange={e => setNewEntry(p => ({ ...p, auditor_id: e.target.value }))}>
+                    <option value="">-- Pilih Auditor --</option>
+                    {auditorList.map((a: any) => <option key={a.id} value={String(a.id)}>{a.full_name}</option>)}
+                  </Select>
+                </div>
+                <div style={{ flex: 1, minWidth: 110 }}>
+                  <Input type="date" value={newEntry.start_date} onChange={e => setNewEntry(p => ({ ...p, start_date: e.target.value }))} />
+                </div>
+                <div style={{ flex: 1, minWidth: 110 }}>
+                  <Input type="date" value={newEntry.end_date} onChange={e => setNewEntry(p => ({ ...p, end_date: e.target.value }))} />
+                </div>
+                <BtnSecondary type="button" onClick={addAuditorEntry} sm>+ Tambah</BtnSecondary>
+              </div>
+            </div>
+          )}
+
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 8, paddingTop: 16, borderTop: `1px solid ${T.gray100}` }}>
             <BtnSecondary onClick={closeModal}>Batal</BtnSecondary>
-            <BtnPrimary type="submit" disabled={saving}><Save size={14} /> {saving ? 'Menyimpan...' : editPT ? 'Simpan Perubahan' : 'Simpan PT'}</BtnPrimary>
+            <BtnPrimary type="submit" disabled={saving}><Save size={14} /> {saving ? 'Menyimpan...' : editPT ? 'Simpan Perubahan' : (assignmentEntries.length > 0 ? `Simpan PT + ${assignmentEntries.length} Penugasan` : 'Simpan PT')}</BtnPrimary>
           </div>
         </form>
       </Modal>
