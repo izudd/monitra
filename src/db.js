@@ -211,12 +211,10 @@ export async function initDb() {
     }
     // Seed default users — hanya INSERT jika belum ada, TIDAK update existing
     // (mencegah user yang sudah dihapus muncul lagi setelah restart)
+    // Hanya seed admin — user lain dibuat manual via aplikasi
+    // Jangan tambah user dummy di sini karena akan muncul lagi setiap restart!
     const seedUsers = [
         { username: 'admin', password: 'admin123', full_name: 'System Administrator', role: 'Admin' },
-        { username: 'supervisor', password: 'supervisor123', full_name: 'John Supervisor', role: 'Supervisor' },
-        { username: 'manager', password: 'manager123', full_name: 'Jane Manager', role: 'Manager' },
-        { username: 'auditor1', password: 'auditor123', full_name: 'Alice Auditor', role: 'Auditor' },
-        { username: 'auditor2', password: 'auditor123', full_name: 'Bob Auditor', role: 'Auditor' },
     ];
     for (const u of seedUsers) {
         const existing = await dbGet('SELECT id FROM users WHERE username = ?', [u.username]);
