@@ -852,9 +852,10 @@ const VisitLogs = () => {
 
   useEffect(() => {
     load();
-    // Auditor & SPV: ambil penugasan sendiri untuk dropdown Check In/Out
+    // Auditor: ambil penugasan sendiri; SPV/Manager: ambil semua assignment tim mereka
     if (canSubmit) {
-      apiFetch(`/api/my-assignments/${user?.id}`, user?.id)
+      const assignUrl = isAuditor ? `/api/my-assignments/${user?.id}` : '/api/assignments';
+      apiFetch(assignUrl, user?.id)
         .then(r => r.json()).then(setAssignments).catch(() => {});
     }
     // SPV & Admin: ambil daftar auditor & PT untuk filter panel
@@ -1189,7 +1190,9 @@ const VisitLogs = () => {
                     <select value={selAssign} onChange={e => setSelAssign(e.target.value)} style={inp}>
                       <option value="">— Pilih PT —</option>
                       {assignments.map((a: any) => (
-                        <option key={a.id} value={String(a.id)}>{a.nama_pt}</option>
+                        <option key={a.id} value={String(a.id)}>
+                          {isAuditor ? a.nama_pt : `${a.nama_pt}${a.auditor_name ? ` — ${a.auditor_name}` : ''}`}
+                        </option>
                       ))}
                     </select>
                   </div>

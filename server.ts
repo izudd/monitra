@@ -1048,6 +1048,8 @@ async function startServer() {
 
   app.post("/api/visits", requireAuth, requireRole("Auditor", "Supervisor", "Manager"), async (req: Request, res: Response) => {
     const currentUser = (req as any).currentUser;
+    const roleRow2 = await db.prepare("SELECT name FROM roles WHERE id = ?").get(currentUser.role_id) as any;
+    const isAuditorRole = roleRow2?.name === "Auditor";
     const { assignment_id, type, photo, latitude, longitude, notes } = req.body;
 
     if (!assignment_id || !["check_in", "check_out"].includes(type)) {
@@ -1057,15 +1059,23 @@ async function startServer() {
       return res.status(400).json({ error: "Foto bukti wajib disertakan" });
     }
 
-    const assignment = await db.prepare(`
-      SELECT aa.id, aa.pt_id, p.nama_pt
-      FROM audit_assignments aa
-      JOIN pts p ON aa.pt_id = p.id
-      WHERE aa.id = ? AND aa.auditor_id = ? AND aa.status = 'Active'
-    `).get(assignment_id, currentUser.id) as any;
+    // Auditor: must own the assignment; Supervisor/Manager: just verify assignment is Active
+    const assignment = isAuditorRole
+      ? await db.prepare(`
+          SELECT aa.id, aa.pt_id, p.nama_pt
+          FROM audit_assignments aa
+          JOIN pts p ON aa.pt_id = p.id
+          WHERE aa.id = ? AND aa.auditor_id = ? AND aa.status = 'Active'
+        `).get(assignment_id, currentUser.id) as any
+      : await db.prepare(`
+          SELECT aa.id, aa.pt_id, p.nama_pt
+          FROM audit_assignments aa
+          JOIN pts p ON aa.pt_id = p.id
+          WHERE aa.id = ? AND aa.status = 'Active'
+        `).get(assignment_id) as any;
 
     if (!assignment) {
-      return res.status(403).json({ error: "Assignment tidak valid atau bukan milik Anda" });
+      return res.status(403).json({ error: "Assignment tidak valid" });
     }
 
     const result = await db.prepare(`
