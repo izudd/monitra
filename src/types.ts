@@ -16,6 +16,11 @@ export interface PT {
   periode_start: string;
   periode_end: string;
   status: 'Active' | 'Completed' | 'Cancelled';
+  // tracking siapa dan dari mana PT ini dibuat
+  source?: 'manual' | 'imdacs_import' | 'imdacs_sync';
+  created_by?: number | null;
+  created_by_name?: string | null;
+  created_at?: string;
 }
 
 export interface Assignment {

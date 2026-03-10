@@ -139,16 +139,26 @@ export async function initDb() {
   // PTs
   await pool.query(`
     CREATE TABLE IF NOT EXISTS pts (
-      id            INT AUTO_INCREMENT PRIMARY KEY,
-      nama_pt       VARCHAR(255) NOT NULL,
-      alamat        TEXT,
-      PIC           VARCHAR(255),
-      periode_start DATE,
-      periode_end   DATE,
-      status        VARCHAR(50) DEFAULT 'Active',
-      archived_at   DATETIME
+      id             INT AUTO_INCREMENT PRIMARY KEY,
+      nama_pt        VARCHAR(255) NOT NULL,
+      alamat         TEXT,
+      PIC            VARCHAR(255),
+      periode_start  DATE,
+      periode_end    DATE,
+      status         VARCHAR(50) DEFAULT 'Active',
+      archived_at    DATETIME,
+      source         VARCHAR(50) DEFAULT 'manual',
+      created_by     INT NULL,
+      created_at     DATETIME DEFAULT CURRENT_TIMESTAMP
     ) CHARACTER SET utf8mb4
   `);
+
+  // Migrasi: tambah kolom baru ke tabel pts yang sudah ada
+  const ptCols = await pool.query(`SHOW COLUMNS FROM pts`) as any;
+  const existingPtCols = new Set((ptCols[0] as any[]).map((c: any) => c.Field));
+  if (!existingPtCols.has('source'))     await pool.query("ALTER TABLE pts ADD COLUMN source VARCHAR(50) DEFAULT 'manual'");
+  if (!existingPtCols.has('created_by')) await pool.query("ALTER TABLE pts ADD COLUMN created_by INT NULL");
+  if (!existingPtCols.has('created_at')) await pool.query("ALTER TABLE pts ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP");
 
   // Audit Assignments
   await pool.query(`

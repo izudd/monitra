@@ -1975,7 +1975,15 @@ const PTManagement = () => {
           <tr key={pt.id} style={{ transition: 'background 0.12s' }}
             onMouseEnter={e => (e.currentTarget as HTMLTableRowElement).style.background = T.gray50}
             onMouseLeave={e => (e.currentTarget as HTMLTableRowElement).style.background = ''}>
-            <Td sub={pt.alamat}><span style={{ fontWeight: 600, color: T.gray900 }}>{pt.nama_pt}</span></Td>
+            <Td sub={(() => {
+              const srcBadge = pt.source === 'imdacs_sync'   ? '🔄 Sync IMDACS'
+                             : pt.source === 'imdacs_import' ? `📥 Import IMDACS${pt.created_by_name ? ` · ${pt.created_by_name}` : ''}`
+                             : pt.created_by_name            ? `👤 ${pt.created_by_name}`
+                             : '';
+              return [pt.alamat, srcBadge].filter(Boolean).join('  ·  ');
+            })()}>
+              <span style={{ fontWeight: 600, color: T.gray900 }}>{pt.nama_pt}</span>
+            </Td>
             <Td>{pt.PIC}</Td>
             <Td mono>{formatDate(pt.periode_start)} – {formatDate(pt.periode_end)}</Td>
             <td style={{ padding: '13px 16px', borderBottom: `1px solid ${T.gray100}` }}>

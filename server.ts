@@ -391,11 +391,18 @@ async function startServer() {
 
   // ─── PROTECTED: PTs ──────────────────────────────────────────────────────
   app.get("/api/pts", requireAuth, async (_req: Request, res: Response) => {
-    const pts = await db.prepare("SELECT * FROM pts WHERE status != 'Archived' ORDER BY id DESC").all();
+    const pts = await db.prepare(`
+      SELECT p.*, u.full_name AS created_by_name
+      FROM pts p
+      LEFT JOIN users u ON p.created_by = u.id
+      WHERE p.status != 'Archived'
+      ORDER BY p.id DESC
+    `).all();
     res.json(pts);
   });
 
   app.post("/api/pts", requireAuth, requireRole("Admin", "Supervisor", "Manager"), async (req: Request, res: Response) => {
+    const currentUser = (req as any).currentUser;
     const { nama_pt, alamat, PIC, periode_start, periode_end } = req.body;
     if (!nama_pt || !PIC) {
       return res.status(400).json({ error: "Nama PT dan PIC wajib diisi" });
@@ -407,14 +414,15 @@ async function startServer() {
     if (dup) return res.status(409).json({ error: `PT "${nama_pt}" sudah terdaftar` });
 
     const result = await db.prepare(`
-      INSERT INTO pts (nama_pt, alamat, PIC, periode_start, periode_end)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(nama_pt, alamat || "", PIC, periode_start, periode_end);
+      INSERT INTO pts (nama_pt, alamat, PIC, periode_start, periode_end, source, created_by)
+      VALUES (?, ?, ?, ?, ?, 'manual', ?)
+    `).run(nama_pt, alamat || "", PIC, periode_start, periode_end, currentUser.id);
     res.status(201).json({ id: result.lastInsertRowid });
   });
 
   // ─── Import semua DEAL clients dari IMDACS sekaligus ─────────────────────────
-  app.post("/api/pts/import-imdacs", requireAuth, requireRole("Admin", "Supervisor", "Manager"), async (_req: Request, res: Response) => {
+  app.post("/api/pts/import-imdacs", requireAuth, requireRole("Admin", "Supervisor", "Manager"), async (req: Request, res: Response) => {
+    const currentUser = (req as any).currentUser;
     try {
       const url = 'https://imdacs.assetsmanagement.shop/api/clients.php?export_deals=1&key=imdacs-monitra-sync-2026';
       const response = await fetch(url);
@@ -434,9 +442,9 @@ async function startServer() {
         const periodeEnd   = yearWork ? `${yearWork}-12-31` : null;
 
         await db.prepare(`
-          INSERT INTO pts (nama_pt, alamat, PIC, periode_start, periode_end)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(c.name, c.address || '', c.picName || '', periodeStart, periodeEnd);
+          INSERT INTO pts (nama_pt, alamat, PIC, periode_start, periode_end, source, created_by)
+          VALUES (?, ?, ?, ?, ?, 'imdacs_import', ?)
+        `).run(c.name, c.address || '', c.picName || '', periodeStart, periodeEnd, currentUser.id);
         created++;
       }
 
@@ -467,8 +475,8 @@ async function startServer() {
       }
 
       const result = await db.prepare(`
-        INSERT INTO pts (nama_pt, alamat, PIC, periode_start, periode_end)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO pts (nama_pt, alamat, PIC, periode_start, periode_end, source, created_by)
+        VALUES (?, ?, ?, ?, ?, 'imdacs_sync', NULL)
       `).run(nama_pt, alamat || '', PIC || '', periode_start || null, periode_end || null);
 
       console.log(`[SYNC] PT baru dari IMDACS: ${nama_pt}`);
