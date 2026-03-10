@@ -364,6 +364,38 @@ async function startServer() {
     `).run(nama_pt, alamat || "", PIC, periode_start, periode_end);
         res.status(201).json({ id: result.lastInsertRowid });
     });
+    // ─── Import semua DEAL clients dari IMDACS sekaligus ─────────────────────────
+    app.post("/api/pts/import-imdacs", requireAuth, requireRole("Admin", "Supervisor", "Manager"), async (_req, res) => {
+        try {
+            const url = 'https://imdacs.assetsmanagement.shop/api/clients.php?export_deals=1&key=imdacs-monitra-sync-2026';
+            const response = await fetch(url);
+            if (!response.ok)
+                throw new Error('Gagal mengambil data dari IMDACS');
+            const clients = await response.json();
+            let created = 0, skipped = 0;
+            for (const c of clients) {
+                const existing = await db.prepare("SELECT id FROM pts WHERE nama_pt = ? AND status != 'Archived'").get(c.name);
+                if (existing) {
+                    skipped++;
+                    continue;
+                }
+                const yearWork = c.yearWork;
+                const periodeStart = yearWork ? `${yearWork}-01-01` : null;
+                const periodeEnd = yearWork ? `${yearWork}-12-31` : null;
+                await db.prepare(`
+          INSERT INTO pts (nama_pt, alamat, PIC, periode_start, periode_end)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(c.name, c.address || '', c.picName || '', periodeStart, periodeEnd);
+                created++;
+            }
+            console.log(`[IMPORT] ${created} PT baru dari IMDACS, ${skipped} sudah ada`);
+            res.json({ created, skipped, total: clients.length });
+        }
+        catch (err) {
+            console.error('[IMPORT] Error:', err.message);
+            res.status(500).json({ error: err.message });
+        }
+    });
     // ─── INTERNAL: Sync PT dari IMDACS (pakai API key, tanpa user auth) ─────────
     const SYNC_SECRET = process.env.SYNC_SECRET || 'imdacs-monitra-sync-2026';
     app.post("/api/internal/sync-pt", async (req, res) => {

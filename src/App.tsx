@@ -318,15 +318,16 @@ const BtnPrimary = ({ children, onClick, type = 'button', fullWidth = false, sm 
   >{children}</button>
 );
 
-const BtnSecondary = ({ children, onClick, type = 'button', sm = false }: any) => (
-  <button type={type} onClick={onClick} style={{
+const BtnSecondary = ({ children, onClick, type = 'button', sm = false, disabled = false, style: extraStyle = {} }: any) => (
+  <button type={type} onClick={onClick} disabled={disabled} style={{
     display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-    background: T.white, color: T.gray700, fontFamily: SANS, fontWeight: 500,
+    background: T.white, color: disabled ? T.gray400 : T.gray700, fontFamily: SANS, fontWeight: 500,
     fontSize: sm ? 12 : 13, padding: sm ? '5px 12px' : '8px 16px',
-    borderRadius: 6, border: `1px solid ${T.gray300}`, cursor: 'pointer', transition: 'background 0.15s',
+    borderRadius: 6, border: `1px solid ${T.gray300}`, cursor: disabled ? 'not-allowed' : 'pointer',
+    opacity: disabled ? 0.6 : 1, transition: 'background 0.15s', ...extraStyle,
   }}
-    onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = T.gray50; }}
-    onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = T.white; }}
+    onMouseEnter={e => { if (!disabled) (e.currentTarget as HTMLButtonElement).style.background = T.gray50; }}
+    onMouseLeave={e => { if (!disabled) (e.currentTarget as HTMLButtonElement).style.background = T.white; }}
   >{children}</button>
 );
 
@@ -1861,7 +1862,8 @@ const PTManagement = () => {
 
   const initForm = { nama_pt: '', alamat: '', PIC: '', periode_start: '', periode_end: '', status: 'Active' as const };
   const [form, setForm] = useState(initForm);
-  const [saving, setSaving] = useState(false);
+  const [saving,    setSaving]    = useState(false);
+  const [importing, setImporting] = useState(false);
 
   const load = useCallback(() => {
     apiFetch('/api/pts', user?.id)
@@ -1869,6 +1871,21 @@ const PTManagement = () => {
       .then(setPts)
       .catch(e => toast(e.message, 'error'));
   }, [user?.id]);
+
+  const importFromImdacs = async () => {
+    setImporting(true);
+    try {
+      const r = await apiFetch('/api/pts/import-imdacs', user?.id, { method: 'POST' });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'Gagal import');
+      toast(`Import selesai: ${data.created} PT baru, ${data.skipped} sudah ada`, 'success');
+      load();
+    } catch (e: any) {
+      toast(e.message, 'error');
+    } finally {
+      setImporting(false);
+    }
+  };
 
   useEffect(() => { load(); }, [load]);
 
@@ -1910,6 +1927,9 @@ const PTManagement = () => {
   return (
     <div>
       <PageHeader title="PT Management" breadcrumb="PT Management">
+        <BtnSecondary onClick={importFromImdacs} disabled={importing} style={{ marginRight: 8 }}>
+          {importing ? 'Mengimpor...' : '↙ Import dari IMDACS'}
+        </BtnSecondary>
         <BtnPrimary onClick={openAdd}><Plus size={14} /> Tambah PT Baru</BtnPrimary>
       </PageHeader>
 
