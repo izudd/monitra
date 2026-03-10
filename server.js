@@ -450,15 +450,28 @@ async function startServer() {
         res.json({ success: true });
     });
     // ─── PROTECTED: Assignments ───────────────────────────────────────────────
-    app.get("/api/assignments", requireAuth, async (_req, res) => {
-        const assignments = await db.prepare(`
-      SELECT a.*, p.nama_pt, u.full_name as auditor_name
-      FROM audit_assignments a
-      JOIN pts p ON a.pt_id = p.id
-      JOIN users u ON a.auditor_id = u.id
-      WHERE p.archived_at IS NULL
-      ORDER BY a.id DESC
-    `).all();
+    app.get("/api/assignments", requireAuth, async (req, res) => {
+        const currentUser = req.currentUser;
+        const roleRow = await db.prepare("SELECT name FROM roles WHERE id = ?").get(currentUser.role_id);
+        // Supervisor: hanya lihat assignment auditor miliknya
+        // Manager/Admin: lihat semua
+        const assignments = roleRow?.name === "Supervisor"
+            ? await db.prepare(`
+          SELECT a.*, p.nama_pt, u.full_name as auditor_name
+          FROM audit_assignments a
+          JOIN pts p ON a.pt_id = p.id
+          JOIN users u ON a.auditor_id = u.id
+          WHERE p.archived_at IS NULL AND u.supervisor_id = ?
+          ORDER BY a.id DESC
+        `).all(currentUser.id)
+            : await db.prepare(`
+          SELECT a.*, p.nama_pt, u.full_name as auditor_name
+          FROM audit_assignments a
+          JOIN pts p ON a.pt_id = p.id
+          JOIN users u ON a.auditor_id = u.id
+          WHERE p.archived_at IS NULL
+          ORDER BY a.id DESC
+        `).all();
         res.json(assignments);
     });
     app.post("/api/assignments", requireAuth, requireRole("Admin", "Supervisor", "Manager"), async (req, res) => {
@@ -493,25 +506,43 @@ async function startServer() {
     app.get("/api/reports", requireAuth, async (req, res) => {
         const currentUser = req.currentUser;
         const roleRow = await db.prepare("SELECT name FROM roles WHERE id = ?").get(currentUser.role_id);
-        const reports = roleRow.name === "Auditor"
-            ? await db.prepare(`
-          SELECT r.*, p.nama_pt, u.full_name as auditor_name, a.auditor_id
-          FROM daily_reports r
-          JOIN audit_assignments a ON r.assignment_id = a.id
-          JOIN pts p ON a.pt_id = p.id
-          JOIN users u ON a.auditor_id = u.id
-          WHERE a.auditor_id = ? AND p.archived_at IS NULL
-          ORDER BY r.tanggal DESC, r.created_at DESC
-        `).all(currentUser.id)
-            : await db.prepare(`
-          SELECT r.*, p.nama_pt, u.full_name as auditor_name, a.auditor_id
-          FROM daily_reports r
-          JOIN audit_assignments a ON r.assignment_id = a.id
-          JOIN pts p ON a.pt_id = p.id
-          JOIN users u ON a.auditor_id = u.id
-          WHERE p.archived_at IS NULL
-          ORDER BY r.tanggal DESC, r.created_at DESC
-        `).all();
+        let reports;
+        if (roleRow.name === "Auditor") {
+            // Auditor: hanya lihat laporan miliknya sendiri
+            reports = await db.prepare(`
+        SELECT r.*, p.nama_pt, u.full_name as auditor_name, a.auditor_id
+        FROM daily_reports r
+        JOIN audit_assignments a ON r.assignment_id = a.id
+        JOIN pts p ON a.pt_id = p.id
+        JOIN users u ON a.auditor_id = u.id
+        WHERE a.auditor_id = ? AND p.archived_at IS NULL
+        ORDER BY r.tanggal DESC, r.created_at DESC
+      `).all(currentUser.id);
+        }
+        else if (roleRow.name === "Supervisor") {
+            // Supervisor: hanya lihat laporan dari auditor yang berada di bawahnya
+            reports = await db.prepare(`
+        SELECT r.*, p.nama_pt, u.full_name as auditor_name, a.auditor_id
+        FROM daily_reports r
+        JOIN audit_assignments a ON r.assignment_id = a.id
+        JOIN pts p ON a.pt_id = p.id
+        JOIN users u ON a.auditor_id = u.id
+        WHERE p.archived_at IS NULL AND u.supervisor_id = ?
+        ORDER BY r.tanggal DESC, r.created_at DESC
+      `).all(currentUser.id);
+        }
+        else {
+            // Manager / Admin: lihat semua laporan
+            reports = await db.prepare(`
+        SELECT r.*, p.nama_pt, u.full_name as auditor_name, a.auditor_id
+        FROM daily_reports r
+        JOIN audit_assignments a ON r.assignment_id = a.id
+        JOIN pts p ON a.pt_id = p.id
+        JOIN users u ON a.auditor_id = u.id
+        WHERE p.archived_at IS NULL
+        ORDER BY r.tanggal DESC, r.created_at DESC
+      `).all();
+        }
         res.json(reports);
     });
     app.post("/api/reports", requireAuth, requireRole("Auditor", "Supervisor", "Manager"), async (req, res) => {
