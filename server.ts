@@ -58,6 +58,26 @@ async function getSmtpConfig() {
   };
 }
 
+// ─── WHATSAPP / FONNTE HELPER ─────────────────────────────────────────────────
+async function sendWhatsApp(phone: string, message: string) {
+  const token = ((await db.prepare("SELECT value FROM system_config WHERE `key`='fonnte_token'").get()) as any)?.value ?? "";
+  if (!token) throw new Error("Token Fonnte belum dikonfigurasi. Hubungi Admin.");
+
+  // Normalise nomor: buang +, prefix 0 → 62
+  let target = phone.replace(/\D/g, "");
+  if (target.startsWith("0")) target = "62" + target.slice(1);
+
+  const body = new URLSearchParams({ target, message, countryCode: "62" });
+  const res = await fetch("https://api.fonnte.com/send", {
+    method: "POST",
+    headers: { Authorization: token, "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+  if (!res.ok) throw new Error(`Fonnte HTTP ${res.status}`);
+  const json = await res.json() as any;
+  if (json.status === false) throw new Error(json.reason || "Gagal kirim WA");
+}
+
 async function sendEmail(to: string, subject: string, html: string) {
   const c = await getSmtpConfig();
   if (!c.host || !c.user || !c.pass)
@@ -1135,10 +1155,10 @@ async function startServer() {
     const isSelf = String(currentUser.id) === String(req.params.id);
     if (!isAdmin && !isSelf) return res.status(403).json({ error: "Tidak diizinkan" });
     const profile = await db.prepare(
-      "SELECT id, full_name, email, email_reminder FROM users WHERE id = ?"
+      "SELECT id, full_name, email, email_reminder, phone, wa_reminder FROM users WHERE id = ?"
     ).get(req.params.id) as any;
     if (!profile) return res.status(404).json({ error: "User tidak ditemukan" });
-    res.json({ ...profile, email_reminder: profile.email_reminder !== 0 });
+    res.json({ ...profile, email_reminder: profile.email_reminder !== 0, wa_reminder: profile.wa_reminder !== 0 });
   });
 
   app.patch("/api/users/:id/profile", requireAuth, async (req: Request, res: Response) => {
@@ -1147,10 +1167,12 @@ async function startServer() {
     const isAdmin = roleRow?.name === "Admin";
     const isSelf = String(currentUser.id) === String(req.params.id);
     if (!isAdmin && !isSelf) return res.status(403).json({ error: "Tidak diizinkan" });
-    const { full_name, email, email_reminder } = req.body;
-    if (full_name !== undefined) await db.prepare("UPDATE users SET full_name=? WHERE id=?").run(full_name, req.params.id);
-    if (email !== undefined)     await db.prepare("UPDATE users SET email=? WHERE id=?").run(email, req.params.id);
+    const { full_name, email, email_reminder, phone, wa_reminder } = req.body;
+    if (full_name !== undefined)     await db.prepare("UPDATE users SET full_name=? WHERE id=?").run(full_name, req.params.id);
+    if (email !== undefined)         await db.prepare("UPDATE users SET email=? WHERE id=?").run(email, req.params.id);
     if (email_reminder !== undefined) await db.prepare("UPDATE users SET email_reminder=? WHERE id=?").run(email_reminder ? 1 : 0, req.params.id);
+    if (phone !== undefined)         await db.prepare("UPDATE users SET phone=? WHERE id=?").run(phone || null, req.params.id);
+    if (wa_reminder !== undefined)   await db.prepare("UPDATE users SET wa_reminder=? WHERE id=?").run(wa_reminder ? 1 : 0, req.params.id);
     res.json({ success: true });
   });
 
@@ -1185,7 +1207,7 @@ async function startServer() {
   });
 
   app.patch("/api/config", requireAuth, requireRole("Admin"), async (req: Request, res: Response) => {
-    const allowed = ["smtp_host", "smtp_port", "smtp_secure", "smtp_user", "smtp_pass", "smtp_from", "reminder_time"];
+    const allowed = ["smtp_host", "smtp_port", "smtp_secure", "smtp_user", "smtp_pass", "smtp_from", "reminder_time", "fonnte_token"];
     for (const [k, v] of Object.entries(req.body)) {
       if (!allowed.includes(k)) continue;
       await db.prepare(`
@@ -1194,6 +1216,17 @@ async function startServer() {
       `).run(k, v as string);
     }
     res.json({ success: true });
+  });
+
+  app.post("/api/config/test-wa", requireAuth, requireRole("Admin"), async (req: Request, res: Response) => {
+    const { to } = req.body;
+    if (!to) return res.status(400).json({ error: "Nomor WhatsApp tujuan wajib diisi" });
+    try {
+      await sendWhatsApp(to, `✅ Test WhatsApp dari MONITRA berhasil!\nDikirim pada ${new Date().toLocaleString("id-ID")}`);
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   app.post("/api/config/test-email", requireAuth, requireRole("Admin"), async (req: Request, res: Response) => {
@@ -1283,6 +1316,43 @@ async function startServer() {
       },
     });
   }
+
+  // ─── CRON: Pengingat WA via Fonnte (jam 16:30 Senin–Jumat) ─────────────
+  cron.schedule("30 16 * * 1-5", async () => {
+    const today = new Date().toISOString().split("T")[0];
+
+    const auditors = await db.prepare(`
+      SELECT DISTINCT u.id, u.full_name, u.phone, u.wa_reminder,
+             GROUP_CONCAT(DISTINCT p.nama_pt) as pt_list
+      FROM users u
+      JOIN audit_assignments aa ON aa.auditor_id = u.id
+      JOIN pts p ON aa.pt_id = p.id
+      JOIN roles r ON u.role_id = r.id
+      WHERE r.name = 'Auditor'
+        AND aa.status = 'Active'
+        AND p.archived_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM daily_reports dr
+          WHERE dr.assignment_id = aa.id AND dr.tanggal = ?
+        )
+      GROUP BY u.id
+    `).all(today) as any[];
+
+    let sent = 0;
+    for (const aud of auditors) {
+      if (!aud.phone || aud.wa_reminder === 0) continue;
+      try {
+        const ptLines = (aud.pt_list || '').split(',').map((p: string) => `• ${p.trim()}`).join('\n');
+        const msg = `⏰ *Pengingat MONITRA*\n\nHalo *${aud.full_name}*,\n\nAnda belum mengisi laporan harian hari ini untuk:\n${ptLines}\n\nSilakan buka MONITRA dan isi laporan sebelum hari berakhir.\n\n_Dikirim otomatis oleh sistem MONITRA_`;
+        await sendWhatsApp(aud.phone, msg);
+        sent++;
+        console.log(`[WA] Reminder terkirim → ${aud.phone} (${aud.full_name})`);
+      } catch (err: any) {
+        console.error(`[WA] Gagal kirim ke ${aud.phone}: ${err.message}`);
+      }
+    }
+    console.log(`[WA] Daily WA reminder selesai: ${sent}/${auditors.length} terkirim`);
+  }, { timezone: "Asia/Jakarta" });
 
   // ─── CRON: Pengingat Laporan Harian (jam 16:00 Senin–Jumat) ──────────────
   cron.schedule("0 16 * * 1-5", async () => {

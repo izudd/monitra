@@ -91,10 +91,18 @@ export async function initDb() {
       email_reminder TINYINT(1) DEFAULT 1,
       kode_unik      VARCHAR(20),
       supervisor_id  INT,
+      phone          VARCHAR(30) DEFAULT NULL,
+      wa_reminder    TINYINT(1) DEFAULT 1,
       FOREIGN KEY (role_id)       REFERENCES roles(id),
       FOREIGN KEY (supervisor_id) REFERENCES users(id)
     ) CHARACTER SET utf8mb4
   `);
+
+  // Migrasi: tambah kolom phone & wa_reminder ke users yang sudah ada
+  const userCols = await pool.query(`SHOW COLUMNS FROM users`) as any;
+  const existingUserCols = new Set((userCols[0] as any[]).map((c: any) => c.Field));
+  if (!existingUserCols.has('phone'))       await pool.query("ALTER TABLE users ADD COLUMN phone VARCHAR(30) DEFAULT NULL");
+  if (!existingUserCols.has('wa_reminder')) await pool.query("ALTER TABLE users ADD COLUMN wa_reminder TINYINT(1) DEFAULT 1");
 
   // SPV Daily Reports
   await pool.query(`

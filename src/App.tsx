@@ -4791,12 +4791,40 @@ const AccountSettings = () => {
   const [smtpTesting, setSmtpTesting] = useState(false);
   const isAdmin = me?.role === 'Admin';
 
+  // Fonnte config state (Admin only)
+  const [fonnteToken, setFonnteToken] = useState('');
+  const [fonnteSaving, setFonnteSaving] = useState(false);
+  const [fonnteTestPhone, setFonnteTestPhone] = useState('');
+  const [fonnteTesting, setFonnteTesting] = useState(false);
+
   useEffect(() => {
     if (!isAdmin) return;
     apiFetch('/api/config', me?.id).then(r => r.json()).then((d: any) => {
       setSmtpForm(prev => ({ ...prev, ...d, smtp_pass: '' })); // jangan tampilkan pass yang ada
+      if (d.fonnte_token && d.fonnte_token !== '••••••••') setFonnteToken(''); // sudah ada, jangan tampilkan
     }).catch(() => {});
   }, [isAdmin, me?.id]);
+
+  const saveFonnte = async (e: React.FormEvent) => {
+    e.preventDefault(); setFonnteSaving(true);
+    try {
+      const r = await apiFetch('/api/config', me?.id, { method: 'PATCH', body: JSON.stringify({ fonnte_token: fonnteToken }) });
+      if (!r.ok) throw new Error('Gagal menyimpan');
+      toast('Token Fonnte berhasil disimpan', 'success');
+      setFonnteToken('');
+    } catch { toast('Gagal menyimpan token', 'error'); } finally { setFonnteSaving(false); }
+  };
+
+  const testFonnte = async () => {
+    if (!fonnteTestPhone) { toast('Masukkan nomor WA tujuan test', 'error'); return; }
+    setFonnteTesting(true);
+    try {
+      const r = await apiFetch('/api/config/test-wa', me?.id, { method: 'POST', body: JSON.stringify({ to: fonnteTestPhone }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Gagal');
+      toast('✅ Test WhatsApp berhasil dikirim!', 'success');
+    } catch (e: any) { toast(`❌ ${e.message}`, 'error'); } finally { setFonnteTesting(false); }
+  };
 
   const saveSmtp = async (e: React.FormEvent) => {
     e.preventDefault(); setSmtpSaving(true);
@@ -4821,15 +4849,21 @@ const AccountSettings = () => {
   };
 
   // Profile form
-  const [profileForm, setProfileForm] = useState({ full_name: me?.full_name || '', phone: '', location: '', bio: '', email: '', email_reminder: true });
+  const [profileForm, setProfileForm] = useState({ full_name: me?.full_name || '', phone: '', location: '', bio: '', email: '', email_reminder: true, wa_reminder: true });
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileEditing, setProfileEditing] = useState(false);
 
-  // Fetch email dari server saat mount
+  // Fetch profil dari server saat mount
   useEffect(() => {
     if (!me?.id) return;
     apiFetch(`/api/users/${me.id}/profile`, me.id).then(r => r.json()).then((d: any) => {
-      if (d?.email !== undefined) setProfileForm(prev => ({ ...prev, email: d.email || '', email_reminder: d.email_reminder !== false && d.email_reminder !== 0 }));
+      if (d) setProfileForm(prev => ({
+        ...prev,
+        email:         d.email         || '',
+        email_reminder: d.email_reminder !== false && d.email_reminder !== 0,
+        phone:         d.phone         || '',
+        wa_reminder:   d.wa_reminder   !== false && d.wa_reminder !== 0,
+      }));
     }).catch(() => {});
   }, [me?.id]);
 
@@ -4907,9 +4941,11 @@ const AccountSettings = () => {
       const r = await apiFetch(`/api/users/${me?.id}/profile`, me?.id, {
         method: 'PATCH',
         body: JSON.stringify({
-          full_name: profileForm.full_name.trim(),
-          email: profileForm.email.trim(),
+          full_name:     profileForm.full_name.trim(),
+          email:         profileForm.email.trim(),
           email_reminder: profileForm.email_reminder,
+          phone:         profileForm.phone.trim(),
+          wa_reminder:   profileForm.wa_reminder,
         }),
       });
       if (!r.ok) { const err = await r.json(); throw new Error(err.error || 'Gagal menyimpan profil'); }
@@ -5088,14 +5124,26 @@ const AccountSettings = () => {
                           </div>
                           <div style={{ fontSize: 11, color: T.gray400, marginTop: 4 }}>Digunakan untuk mengirim pengingat laporan harian jam 16:00</div>
                         </Field>
-                        <Field label="No. Telepon (Opsional)">
+                        <Field label="No. WhatsApp">
                           <div style={{ position: 'relative' }}>
-                            <Phone size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: T.gray400, pointerEvents: 'none' }} />
-                            <input value={profileForm.phone} onChange={pf('phone')} placeholder="+62 8xx-xxxx-xxxx" style={{ ...inp, paddingLeft: 34 }}
+                            <Phone size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#25D366', pointerEvents: 'none' }} />
+                            <input value={profileForm.phone} onChange={pf('phone')} placeholder="0812-xxxx-xxxx atau 6281xxx" style={{ ...inp, paddingLeft: 34 }}
                               onFocus={e => Object.assign(e.target.style, focus)} onBlur={e => Object.assign(e.target.style, blur)} />
                           </div>
-                          <div style={{ fontSize: 11, color: T.gray400, marginTop: 4 }}>Info tambahan, tidak digunakan untuk autentikasi</div>
+                          <div style={{ fontSize: 11, color: T.gray400, marginTop: 4 }}>Digunakan untuk mengirim pengingat laporan harian via WhatsApp jam 16:30</div>
                         </Field>
+                        {profileForm.phone && (
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', background: '#f0fdf4', borderRadius: 8, border: '1px solid #bbf7d0', marginTop: -8 }}>
+                            <div>
+                              <div style={{ fontSize: 12, fontWeight: 600, color: '#15803d' }}>Pengingat via WhatsApp</div>
+                              <div style={{ fontSize: 11, color: '#16a34a', marginTop: 1 }}>Kirim pesan WA jam 16:30 jika belum isi laporan</div>
+                            </div>
+                            <div onClick={() => setProfileForm(p => ({ ...p, wa_reminder: !p.wa_reminder }))}
+                              style={{ width: 44, height: 24, borderRadius: 12, background: profileForm.wa_reminder ? '#25D366' : T.gray200, cursor: 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0 }}>
+                              <div style={{ position: 'absolute', top: 3, left: profileForm.wa_reminder ? 23 : 3, width: 18, height: 18, borderRadius: '50%', background: T.white, transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)' }} />
+                            </div>
+                          </div>
+                        )}
                         <Field label="Lokasi / Kantor (Opsional)">
                           <div style={{ position: 'relative' }}>
                             <MapPin size={14} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: T.gray400, pointerEvents: 'none' }} />
@@ -5117,7 +5165,7 @@ const AccountSettings = () => {
                           { icon: UserCheck, label: 'Nama Lengkap', value: me?.full_name },
                           { icon: Shield,    label: 'Role / Jabatan', value: me?.role },
                           { icon: Mail,      label: 'Email Pengingat', value: profileForm.email || '—' },
-                          { icon: Phone,     label: 'No. Telepon', value: profileForm.phone || '—' },
+                          { icon: Phone,     label: 'No. WhatsApp', value: profileForm.phone || '—' },
                           { icon: MapPin,    label: 'Lokasi / Kantor', value: profileForm.location || '—' },
                         ].map((row, i) => (
                           <div key={row.label} style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '13px 0', borderBottom: i < 4 ? `1px solid ${T.gray100}` : 'none' }}>
@@ -5270,6 +5318,32 @@ const AccountSettings = () => {
                         }}
                           style={{ width: 44, height: 24, borderRadius: 12, background: profileForm.email_reminder ? '#d97706' : T.gray200, cursor: 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0 }}>
                           <div style={{ position: 'absolute', top: 3, left: profileForm.email_reminder ? 23 : 3, width: 18, height: 18, borderRadius: '50%', background: T.white, transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)' }} />
+                        </div>
+                      </div>
+
+                      {/* WA reminder toggle */}
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '14px 0', borderTop: `1px solid ${T.gray100}` }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                          <div style={{ width: 36, height: 36, borderRadius: 8, background: '#f0fdf4', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, border: '1px solid #bbf7d0' }}>
+                            <Phone size={15} style={{ color: '#25D366' }} />
+                          </div>
+                          <div>
+                            <div style={{ fontSize: 13, fontWeight: 500, color: T.gray800 }}>Pengingat WhatsApp Harian</div>
+                            <div style={{ fontSize: 11, color: T.gray400, marginTop: 2 }}>
+                              Terima pesan WA jam <strong>16:30</strong> jika belum isi laporan hari ini
+                              {!profileForm.phone && <span style={{ color: '#d97706', marginLeft: 4 }}>— isi No. WA di Profil Akun</span>}
+                            </div>
+                          </div>
+                        </div>
+                        <div onClick={async () => {
+                          if (!profileForm.phone) { toast('Isi No. WhatsApp di Profil Akun terlebih dahulu', 'error'); return; }
+                          const newVal = !profileForm.wa_reminder;
+                          setProfileForm(p => ({ ...p, wa_reminder: newVal }));
+                          await apiFetch(`/api/users/${me?.id}/profile`, me?.id, { method: 'PATCH', body: JSON.stringify({ wa_reminder: newVal }) });
+                          toast(newVal ? '📱 Pengingat WhatsApp diaktifkan' : '🔕 Pengingat WhatsApp dimatikan', 'info');
+                        }}
+                          style={{ width: 44, height: 24, borderRadius: 12, background: profileForm.wa_reminder && profileForm.phone ? '#25D366' : T.gray200, cursor: 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0 }}>
+                          <div style={{ position: 'absolute', top: 3, left: profileForm.wa_reminder && profileForm.phone ? 23 : 3, width: 18, height: 18, borderRadius: '50%', background: T.white, transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)' }} />
                         </div>
                       </div>
                     </div>
@@ -5428,6 +5502,57 @@ const AccountSettings = () => {
                         </BtnPrimary>
                       </div>
                       <div style={{ fontSize: 11, color: T.gray400, marginTop: 6 }}>Simpan konfigurasi terlebih dahulu sebelum mengirim test email</div>
+                    </div>
+
+                    {/* ── Fonnte (WhatsApp) Config ── */}
+                    <div style={{ marginTop: 28, paddingTop: 24, borderTop: `2px solid ${T.gray100}` }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+                        <div style={{ width: 36, height: 36, borderRadius: 9, background: '#f0fdf4', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid #bbf7d0' }}>
+                          <Phone size={16} style={{ color: '#25D366' }} />
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 14, fontWeight: 600, color: T.gray900 }}>Konfigurasi WhatsApp (Fonnte)</div>
+                          <div style={{ fontSize: 12, color: T.gray400, marginTop: 1 }}>Token device Fonnte untuk kirim pengingat WA jam 16:30</div>
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'flex', gap: 10, padding: '12px 16px', background: '#f0fdf4', borderRadius: 8, border: '1px solid #bbf7d0', marginBottom: 18 }}>
+                        <Phone size={14} style={{ color: '#16a34a', flexShrink: 0, marginTop: 1 }} />
+                        <div style={{ fontSize: 12, color: '#15803d', lineHeight: 1.7 }}>
+                          <strong>Cara pakai Fonnte:</strong> Login ke <a href="https://app.fonnte.com" target="_blank" rel="noopener" style={{ color: '#15803d', fontWeight: 700 }}>app.fonnte.com</a>, buka Device → klik <strong>Token</strong> → salin token-nya ke sini.
+                          <br />Auditor perlu isi No. WhatsApp di <strong>Pengaturan → Profil Akun</strong>.
+                        </div>
+                      </div>
+
+                      <form onSubmit={saveFonnte} style={{ maxWidth: 480 }}>
+                        <Field label="Token Device Fonnte">
+                          <PasswordInput value={fonnteToken} onChange={(e: any) => setFonnteToken(e.target.value)} placeholder="Masukkan token (kosongkan jika tidak ingin mengubah)" />
+                          <div style={{ fontSize: 11, color: T.gray400, marginTop: 4 }}>Token ditemukan di Fonnte → Device → Token</div>
+                        </Field>
+                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', paddingTop: 12 }}>
+                          <BtnPrimary type="submit" disabled={fonnteSaving || !fonnteToken}>
+                            <Save size={13} />{fonnteSaving ? 'Menyimpan...' : 'Simpan Token Fonnte'}
+                          </BtnPrimary>
+                        </div>
+                      </form>
+
+                      {/* Test WA */}
+                      <div style={{ marginTop: 20, padding: 18, background: T.gray50, borderRadius: 10, border: `1px solid ${T.gray200}` }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: T.gray800, marginBottom: 12 }}>
+                          <Phone size={14} style={{ verticalAlign: 'middle', marginRight: 6, color: '#25D366' }} />Kirim WA Test
+                        </div>
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <div style={{ position: 'relative', flex: 1 }}>
+                            <Phone size={13} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: '#25D366', pointerEvents: 'none' }} />
+                            <input value={fonnteTestPhone} onChange={e => setFonnteTestPhone(e.target.value)} placeholder="0812-xxxx-xxxx" style={{ ...inp, paddingLeft: 32, marginBottom: 0 }}
+                              onFocus={e => Object.assign(e.target.style, focus)} onBlur={e => Object.assign(e.target.style, blur)} />
+                          </div>
+                          <BtnPrimary onClick={testFonnte} disabled={fonnteTesting} type="button">
+                            <SendHorizontal size={13} />{fonnteTesting ? 'Mengirim...' : 'Kirim Test WA'}
+                          </BtnPrimary>
+                        </div>
+                        <div style={{ fontSize: 11, color: T.gray400, marginTop: 6 }}>Simpan token Fonnte terlebih dahulu sebelum mengirim test WA</div>
+                      </div>
                     </div>
                   </div>
                 </div>
