@@ -4797,11 +4797,19 @@ const AccountSettings = () => {
   const [fonnteTestPhone, setFonnteTestPhone] = useState('');
   const [fonnteTesting, setFonnteTesting] = useState(false);
 
+  // Reminder time config state (Admin only)
+  const [reminderTimes, setReminderTimes] = useState({ email_reminder_time: '16:00', wa_reminder_time: '16:30' });
+  const [reminderSaving, setReminderSaving] = useState(false);
+
   useEffect(() => {
     if (!isAdmin) return;
     apiFetch('/api/config', me?.id).then(r => r.json()).then((d: any) => {
       setSmtpForm(prev => ({ ...prev, ...d, smtp_pass: '' })); // jangan tampilkan pass yang ada
       if (d.fonnte_token && d.fonnte_token !== '••••••••') setFonnteToken(''); // sudah ada, jangan tampilkan
+      setReminderTimes({
+        email_reminder_time: d.email_reminder_time || '16:00',
+        wa_reminder_time:    d.wa_reminder_time    || '16:30',
+      });
     }).catch(() => {});
   }, [isAdmin, me?.id]);
 
@@ -4824,6 +4832,15 @@ const AccountSettings = () => {
       if (!r.ok) throw new Error(d.error || 'Gagal');
       toast('✅ Test WhatsApp berhasil dikirim!', 'success');
     } catch (e: any) { toast(`❌ ${e.message}`, 'error'); } finally { setFonnteTesting(false); }
+  };
+
+  const saveReminderTimes = async (e: React.FormEvent) => {
+    e.preventDefault(); setReminderSaving(true);
+    try {
+      const r = await apiFetch('/api/config', me?.id, { method: 'PATCH', body: JSON.stringify(reminderTimes) });
+      if (!r.ok) throw new Error('Gagal menyimpan');
+      toast('Jadwal pengingat berhasil disimpan dan langsung aktif', 'success');
+    } catch (e: any) { toast(`❌ ${e.message}`, 'error'); } finally { setReminderSaving(false); }
   };
 
   const saveSmtp = async (e: React.FormEvent) => {
@@ -5512,7 +5529,7 @@ const AccountSettings = () => {
                         </div>
                         <div>
                           <div style={{ fontSize: 14, fontWeight: 600, color: T.gray900 }}>Konfigurasi WhatsApp (Fonnte)</div>
-                          <div style={{ fontSize: 12, color: T.gray400, marginTop: 1 }}>Token device Fonnte untuk kirim pengingat WA jam 16:30</div>
+                          <div style={{ fontSize: 12, color: T.gray400, marginTop: 1 }}>Token device Fonnte untuk kirim pengingat WA otomatis</div>
                         </div>
                       </div>
 
@@ -5553,6 +5570,42 @@ const AccountSettings = () => {
                         </div>
                         <div style={{ fontSize: 11, color: T.gray400, marginTop: 6 }}>Simpan token Fonnte terlebih dahulu sebelum mengirim test WA</div>
                       </div>
+                    </div>
+
+                    {/* ── Jadwal Pengingat ── */}
+                    <div style={{ marginTop: 28, paddingTop: 24, borderTop: `2px solid ${T.gray100}` }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+                        <div style={{ width: 36, height: 36, borderRadius: 9, background: T.blue50, display: 'flex', alignItems: 'center', justifyContent: 'center', border: `1px solid ${T.blue100}` }}>
+                          <Clock size={16} style={{ color: T.blue700 }} />
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 14, fontWeight: 600, color: T.gray900 }}>Jadwal Pengingat</div>
+                          <div style={{ fontSize: 12, color: T.gray400, marginTop: 1 }}>Atur jam kirim pengingat laporan harian (Senin–Jumat)</div>
+                        </div>
+                      </div>
+
+                      <form onSubmit={saveReminderTimes} style={{ maxWidth: 480 }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                          <Field label="Jam Pengingat Email">
+                            <input type="time" value={reminderTimes.email_reminder_time}
+                              onChange={e => setReminderTimes(p => ({ ...p, email_reminder_time: e.target.value }))}
+                              style={inp} onFocus={e => Object.assign(e.target.style, focus)} onBlur={e => Object.assign(e.target.style, blur)} />
+                            <div style={{ fontSize: 11, color: T.gray400, marginTop: 4 }}>Default: 16:00</div>
+                          </Field>
+                          <Field label="Jam Pengingat WhatsApp">
+                            <input type="time" value={reminderTimes.wa_reminder_time}
+                              onChange={e => setReminderTimes(p => ({ ...p, wa_reminder_time: e.target.value }))}
+                              style={inp} onFocus={e => Object.assign(e.target.style, focus)} onBlur={e => Object.assign(e.target.style, blur)} />
+                            <div style={{ fontSize: 11, color: T.gray400, marginTop: 4 }}>Default: 16:30</div>
+                          </Field>
+                        </div>
+                        <div style={{ fontSize: 12, color: T.gray500, marginTop: 8, padding: '10px 14px', background: T.blue50, borderRadius: 8, border: `1px solid ${T.blue100}` }}>
+                          💡 Pengingat hanya terkirim pada hari <strong>Senin–Jumat</strong> ke auditor yang belum mengisi laporan hari itu. Perubahan jam langsung aktif tanpa perlu restart server.
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', paddingTop: 14 }}>
+                          <BtnPrimary type="submit" disabled={reminderSaving}><Save size={13} />{reminderSaving ? 'Menyimpan...' : 'Simpan Jadwal'}</BtnPrimary>
+                        </div>
+                      </form>
                     </div>
                   </div>
                 </div>

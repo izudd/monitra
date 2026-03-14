@@ -78,10 +78,19 @@ export async function initDb() {
       email_reminder TINYINT(1) DEFAULT 1,
       kode_unik      VARCHAR(20),
       supervisor_id  INT,
+      phone          VARCHAR(30) DEFAULT NULL,
+      wa_reminder    TINYINT(1) DEFAULT 1,
       FOREIGN KEY (role_id)       REFERENCES roles(id),
       FOREIGN KEY (supervisor_id) REFERENCES users(id)
     ) CHARACTER SET utf8mb4
   `);
+    // Migrasi: tambah kolom phone & wa_reminder ke users yang sudah ada
+    const userCols = await pool.query(`SHOW COLUMNS FROM users`);
+    const existingUserCols = new Set(userCols[0].map((c) => c.Field));
+    if (!existingUserCols.has('phone'))
+        await pool.query("ALTER TABLE users ADD COLUMN phone VARCHAR(30) DEFAULT NULL");
+    if (!existingUserCols.has('wa_reminder'))
+        await pool.query("ALTER TABLE users ADD COLUMN wa_reminder TINYINT(1) DEFAULT 1");
     // SPV Daily Reports
     await pool.query(`
     CREATE TABLE IF NOT EXISTS spv_daily_reports (
@@ -122,16 +131,28 @@ export async function initDb() {
     // PTs
     await pool.query(`
     CREATE TABLE IF NOT EXISTS pts (
-      id            INT AUTO_INCREMENT PRIMARY KEY,
-      nama_pt       VARCHAR(255) NOT NULL,
-      alamat        TEXT,
-      PIC           VARCHAR(255),
-      periode_start DATE,
-      periode_end   DATE,
-      status        VARCHAR(50) DEFAULT 'Active',
-      archived_at   DATETIME
+      id             INT AUTO_INCREMENT PRIMARY KEY,
+      nama_pt        VARCHAR(255) NOT NULL,
+      alamat         TEXT,
+      PIC            VARCHAR(255),
+      periode_start  DATE,
+      periode_end    DATE,
+      status         VARCHAR(50) DEFAULT 'Active',
+      archived_at    DATETIME,
+      source         VARCHAR(50) DEFAULT 'manual',
+      created_by     INT NULL,
+      created_at     DATETIME DEFAULT CURRENT_TIMESTAMP
     ) CHARACTER SET utf8mb4
   `);
+    // Migrasi: tambah kolom baru ke tabel pts yang sudah ada
+    const ptCols = await pool.query(`SHOW COLUMNS FROM pts`);
+    const existingPtCols = new Set(ptCols[0].map((c) => c.Field));
+    if (!existingPtCols.has('source'))
+        await pool.query("ALTER TABLE pts ADD COLUMN source VARCHAR(50) DEFAULT 'manual'");
+    if (!existingPtCols.has('created_by'))
+        await pool.query("ALTER TABLE pts ADD COLUMN created_by INT NULL");
+    if (!existingPtCols.has('created_at'))
+        await pool.query("ALTER TABLE pts ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP");
     // Audit Assignments
     await pool.query(`
     CREATE TABLE IF NOT EXISTS audit_assignments (

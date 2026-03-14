@@ -155,6 +155,15 @@ function requireRole(...roles: string[]) {
   };
 }
 
+// ─── CRON TASK REFERENCES (dynamic schedule) ──────────────────────────────────
+let emailCronTask: ReturnType<typeof cron.schedule> | null = null;
+let waCronTask: ReturnType<typeof cron.schedule> | null = null;
+
+function timeToCron(time: string): string {
+  const [h, m] = time.split(':').map(Number);
+  return `${m} ${h} * * 1-5`;
+}
+
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
@@ -1207,14 +1216,17 @@ async function startServer() {
   });
 
   app.patch("/api/config", requireAuth, requireRole("Admin"), async (req: Request, res: Response) => {
-    const allowed = ["smtp_host", "smtp_port", "smtp_secure", "smtp_user", "smtp_pass", "smtp_from", "reminder_time", "fonnte_token"];
+    const allowed = ["smtp_host", "smtp_port", "smtp_secure", "smtp_user", "smtp_pass", "smtp_from", "reminder_time", "fonnte_token", "email_reminder_time", "wa_reminder_time"];
+    let cronChanged = false;
     for (const [k, v] of Object.entries(req.body)) {
       if (!allowed.includes(k)) continue;
       await db.prepare(`
         INSERT INTO system_config (\`key\`, value) VALUES (?,?)
         ON DUPLICATE KEY UPDATE value=VALUES(value)
       `).run(k, v as string);
+      if (k === 'email_reminder_time' || k === 'wa_reminder_time') cronChanged = true;
     }
+    if (cronChanged) await rescheduleJobs();
     res.json({ success: true });
   });
 
@@ -1317,88 +1329,91 @@ async function startServer() {
     });
   }
 
-  // ─── CRON: Pengingat WA via Fonnte (jam 16:30 Senin–Jumat) ─────────────
-  cron.schedule("30 16 * * 1-5", async () => {
-    const today = new Date().toISOString().split("T")[0];
+  // ─── CRON: Jadwal Pengingat (dinamis, bisa diubah dari admin settings) ──────
+  async function rescheduleJobs() {
+    const getC = async (k: string, def: string) =>
+      ((await db.prepare("SELECT value FROM system_config WHERE `key`=?").get(k)) as any)?.value ?? def;
 
-    const auditors = await db.prepare(`
-      SELECT DISTINCT u.id, u.full_name, u.phone, u.wa_reminder,
-             GROUP_CONCAT(DISTINCT p.nama_pt) as pt_list
-      FROM users u
-      JOIN audit_assignments aa ON aa.auditor_id = u.id
-      JOIN pts p ON aa.pt_id = p.id
-      JOIN roles r ON u.role_id = r.id
-      WHERE r.name = 'Auditor'
-        AND aa.status = 'Active'
-        AND p.archived_at IS NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM daily_reports dr
-          WHERE dr.assignment_id = aa.id AND dr.tanggal = ?
-        )
-      GROUP BY u.id
-    `).all(today) as any[];
+    const emailTime = await getC('email_reminder_time', '16:00');
+    const waTime    = await getC('wa_reminder_time',    '16:30');
 
-    let sent = 0;
-    for (const aud of auditors) {
-      if (!aud.phone || aud.wa_reminder === 0) continue;
-      try {
-        const ptLines = (aud.pt_list || '').split(',').map((p: string) => `• ${p.trim()}`).join('\n');
-        const msg = `⏰ *Pengingat MONITRA*\n\nHalo *${aud.full_name}*,\n\nAnda belum mengisi laporan harian hari ini untuk:\n${ptLines}\n\nSilakan buka MONITRA dan isi laporan sebelum hari berakhir.\n\n_Dikirim otomatis oleh sistem MONITRA_`;
-        await sendWhatsApp(aud.phone, msg);
-        sent++;
-        console.log(`[WA] Reminder terkirim → ${aud.phone} (${aud.full_name})`);
-      } catch (err: any) {
-        console.error(`[WA] Gagal kirim ke ${aud.phone}: ${err.message}`);
-      }
-    }
-    console.log(`[WA] Daily WA reminder selesai: ${sent}/${auditors.length} terkirim`);
-  }, { timezone: "Asia/Jakarta" });
+    if (emailCronTask) { emailCronTask.destroy(); emailCronTask = null; }
+    if (waCronTask)    { waCronTask.destroy();    waCronTask    = null; }
 
-  // ─── CRON: Pengingat Laporan Harian (jam 16:00 Senin–Jumat) ──────────────
-  cron.schedule("0 16 * * 1-5", async () => {
-    const today = new Date().toISOString().split("T")[0];
-
-    const auditors = await db.prepare(`
-      SELECT DISTINCT u.id, u.full_name, u.email, u.email_reminder,
-             GROUP_CONCAT(DISTINCT p.nama_pt) as pt_list
-      FROM users u
-      JOIN audit_assignments aa ON aa.auditor_id = u.id
-      JOIN pts p ON aa.pt_id = p.id
-      JOIN roles r ON u.role_id = r.id
-      WHERE r.name = 'Auditor'
-        AND aa.status = 'Active'
-        AND p.archived_at IS NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM daily_reports dr
-          WHERE dr.assignment_id = aa.id AND dr.tanggal = ?
-        )
-      GROUP BY u.id
-    `).all(today) as any[];
-
-    for (const aud of auditors) {
-      await createNotif(
-        aud.id,
-        "REMINDER",
-        "⏰ Pengingat Laporan Harian",
-        `Anda belum mengisi laporan hari ini untuk: ${aud.pt_list}`
-      );
-
-      if (aud.email && aud.email_reminder !== 0) {
+    // WA reminder
+    waCronTask = cron.schedule(timeToCron(waTime), async () => {
+      const today = new Date().toISOString().split("T")[0];
+      const auditors = await db.prepare(`
+        SELECT DISTINCT u.id, u.full_name, u.phone, u.wa_reminder,
+               GROUP_CONCAT(DISTINCT p.nama_pt) as pt_list
+        FROM users u
+        JOIN audit_assignments aa ON aa.auditor_id = u.id
+        JOIN pts p ON aa.pt_id = p.id
+        JOIN roles r ON u.role_id = r.id
+        WHERE r.name = 'Auditor'
+          AND aa.status = 'Active'
+          AND p.archived_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM daily_reports dr
+            WHERE dr.assignment_id = aa.id AND dr.tanggal = ?
+          )
+        GROUP BY u.id
+      `).all(today) as any[];
+      let sent = 0;
+      for (const aud of auditors) {
+        if (!aud.phone || aud.wa_reminder === 0) continue;
         try {
-          await sendEmail(
-            aud.email,
-            "🔔 Pengingat: Laporan Harian Belum Diisi — MONITRA",
-            emailReminderTemplate(aud.full_name, aud.pt_list, today)
-          );
-          console.log(`[MONITRA] Reminder email → ${aud.email}`);
+          const ptLines = (aud.pt_list || '').split(',').map((p: string) => `• ${p.trim()}`).join('\n');
+          const msg = `⏰ *Pengingat MONITRA*\n\nHalo *${aud.full_name}*,\n\nAnda belum mengisi laporan harian hari ini untuk:\n${ptLines}\n\nSilakan buka MONITRA dan isi laporan sebelum hari berakhir.\n\n_Dikirim otomatis oleh sistem MONITRA_`;
+          await sendWhatsApp(aud.phone, msg);
+          sent++;
+          console.log(`[WA] Reminder terkirim → ${aud.phone} (${aud.full_name})`);
         } catch (err: any) {
-          console.error(`[MONITRA] Gagal kirim email ke ${aud.email}: ${err.message}`);
+          console.error(`[WA] Gagal kirim ke ${aud.phone}: ${err.message}`);
         }
       }
-    }
+      console.log(`[WA] Daily WA reminder selesai: ${sent}/${auditors.length} terkirim`);
+    }, { timezone: "Asia/Jakarta" });
 
-    console.log(`[MONITRA] Daily reminder selesai: ${auditors.length} auditor belum laporan`);
-  }, { timezone: "Asia/Jakarta" });
+    // Email + notif reminder
+    emailCronTask = cron.schedule(timeToCron(emailTime), async () => {
+      const today = new Date().toISOString().split("T")[0];
+      const auditors = await db.prepare(`
+        SELECT DISTINCT u.id, u.full_name, u.email, u.email_reminder,
+               GROUP_CONCAT(DISTINCT p.nama_pt) as pt_list
+        FROM users u
+        JOIN audit_assignments aa ON aa.auditor_id = u.id
+        JOIN pts p ON aa.pt_id = p.id
+        JOIN roles r ON u.role_id = r.id
+        WHERE r.name = 'Auditor'
+          AND aa.status = 'Active'
+          AND p.archived_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM daily_reports dr
+            WHERE dr.assignment_id = aa.id AND dr.tanggal = ?
+          )
+        GROUP BY u.id
+      `).all(today) as any[];
+      for (const aud of auditors) {
+        await createNotif(aud.id, "REMINDER", "⏰ Pengingat Laporan Harian",
+          `Anda belum mengisi laporan hari ini untuk: ${aud.pt_list}`);
+        if (aud.email && aud.email_reminder !== 0) {
+          try {
+            await sendEmail(aud.email, "🔔 Pengingat: Laporan Harian Belum Diisi — MONITRA",
+              emailReminderTemplate(aud.full_name, aud.pt_list, today));
+            console.log(`[MONITRA] Reminder email → ${aud.email}`);
+          } catch (err: any) {
+            console.error(`[MONITRA] Gagal kirim email ke ${aud.email}: ${err.message}`);
+          }
+        }
+      }
+      console.log(`[MONITRA] Daily reminder selesai: ${auditors.length} auditor belum laporan`);
+    }, { timezone: "Asia/Jakarta" });
+
+    console.log(`[CRON] Jadwal dikonfigurasi: Email=${emailTime}, WA=${waTime}`);
+  }
+
+  await rescheduleJobs();
 }
 
 // Initialize DB then start server

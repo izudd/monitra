@@ -56,6 +56,27 @@ async function getSmtpConfig() {
         from: await get("smtp_from") || process.env.SMTP_FROM || "MONITRA <noreply@monitra.id>",
     };
 }
+// ─── WHATSAPP / FONNTE HELPER ─────────────────────────────────────────────────
+async function sendWhatsApp(phone, message) {
+    const token = (await db.prepare("SELECT value FROM system_config WHERE `key`='fonnte_token'").get())?.value ?? "";
+    if (!token)
+        throw new Error("Token Fonnte belum dikonfigurasi. Hubungi Admin.");
+    // Normalise nomor: buang +, prefix 0 → 62
+    let target = phone.replace(/\D/g, "");
+    if (target.startsWith("0"))
+        target = "62" + target.slice(1);
+    const body = new URLSearchParams({ target, message, countryCode: "62" });
+    const res = await fetch("https://api.fonnte.com/send", {
+        method: "POST",
+        headers: { Authorization: token, "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+    });
+    if (!res.ok)
+        throw new Error(`Fonnte HTTP ${res.status}`);
+    const json = await res.json();
+    if (json.status === false)
+        throw new Error(json.reason || "Gagal kirim WA");
+}
 async function sendEmail(to, subject, html) {
     const c = await getSmtpConfig();
     if (!c.host || !c.user || !c.pass)
@@ -128,6 +149,13 @@ function requireRole(...roles) {
         }
         next();
     };
+}
+// ─── CRON TASK REFERENCES (dynamic schedule) ──────────────────────────────────
+let emailCronTask = null;
+let waCronTask = null;
+function timeToCron(time) {
+    const [h, m] = time.split(':').map(Number);
+    return `${m} ${h} * * 1-5`;
 }
 async function startServer() {
     const app = express();
@@ -361,10 +389,17 @@ async function startServer() {
     });
     // ─── PROTECTED: PTs ──────────────────────────────────────────────────────
     app.get("/api/pts", requireAuth, async (_req, res) => {
-        const pts = await db.prepare("SELECT * FROM pts WHERE status != 'Archived' ORDER BY id DESC").all();
+        const pts = await db.prepare(`
+      SELECT p.*, u.full_name AS created_by_name
+      FROM pts p
+      LEFT JOIN users u ON p.created_by = u.id
+      WHERE p.status != 'Archived'
+      ORDER BY p.id DESC
+    `).all();
         res.json(pts);
     });
     app.post("/api/pts", requireAuth, requireRole("Admin", "Supervisor", "Manager"), async (req, res) => {
+        const currentUser = req.currentUser;
         const { nama_pt, alamat, PIC, periode_start, periode_end } = req.body;
         if (!nama_pt || !PIC) {
             return res.status(400).json({ error: "Nama PT dan PIC wajib diisi" });
@@ -374,13 +409,14 @@ async function startServer() {
         if (dup)
             return res.status(409).json({ error: `PT "${nama_pt}" sudah terdaftar` });
         const result = await db.prepare(`
-      INSERT INTO pts (nama_pt, alamat, PIC, periode_start, periode_end)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(nama_pt, alamat || "", PIC, periode_start, periode_end);
+      INSERT INTO pts (nama_pt, alamat, PIC, periode_start, periode_end, source, created_by)
+      VALUES (?, ?, ?, ?, ?, 'manual', ?)
+    `).run(nama_pt, alamat || "", PIC, periode_start, periode_end, currentUser.id);
         res.status(201).json({ id: result.lastInsertRowid });
     });
     // ─── Import semua DEAL clients dari IMDACS sekaligus ─────────────────────────
-    app.post("/api/pts/import-imdacs", requireAuth, requireRole("Admin", "Supervisor", "Manager"), async (_req, res) => {
+    app.post("/api/pts/import-imdacs", requireAuth, requireRole("Admin", "Supervisor", "Manager"), async (req, res) => {
+        const currentUser = req.currentUser;
         try {
             const url = 'https://imdacs.assetsmanagement.shop/api/clients.php?export_deals=1&key=imdacs-monitra-sync-2026';
             const response = await fetch(url);
@@ -398,9 +434,9 @@ async function startServer() {
                 const periodeStart = yearWork ? `${yearWork}-01-01` : null;
                 const periodeEnd = yearWork ? `${yearWork}-12-31` : null;
                 await db.prepare(`
-          INSERT INTO pts (nama_pt, alamat, PIC, periode_start, periode_end)
-          VALUES (?, ?, ?, ?, ?)
-        `).run(c.name, c.address || '', c.picName || '', periodeStart, periodeEnd);
+          INSERT INTO pts (nama_pt, alamat, PIC, periode_start, periode_end, source, created_by)
+          VALUES (?, ?, ?, ?, ?, 'imdacs_import', ?)
+        `).run(c.name, c.address || '', c.picName || '', periodeStart, periodeEnd, currentUser.id);
                 created++;
             }
             console.log(`[IMPORT] ${created} PT baru dari IMDACS, ${skipped} sudah ada`);
@@ -427,8 +463,8 @@ async function startServer() {
                 return res.json({ id: existing.id, message: 'PT sudah ada, skip' });
             }
             const result = await db.prepare(`
-        INSERT INTO pts (nama_pt, alamat, PIC, periode_start, periode_end)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO pts (nama_pt, alamat, PIC, periode_start, periode_end, source, created_by)
+        VALUES (?, ?, ?, ?, ?, 'imdacs_sync', NULL)
       `).run(nama_pt, alamat || '', PIC || '', periode_start || null, periode_end || null);
             console.log(`[SYNC] PT baru dari IMDACS: ${nama_pt}`);
             res.status(201).json({ id: result.lastInsertRowid, message: 'PT berhasil dibuat' });
@@ -944,6 +980,8 @@ async function startServer() {
     });
     app.post("/api/visits", requireAuth, requireRole("Auditor", "Supervisor", "Manager"), async (req, res) => {
         const currentUser = req.currentUser;
+        const roleRow2 = await db.prepare("SELECT name FROM roles WHERE id = ?").get(currentUser.role_id);
+        const isAuditorRole = roleRow2?.name === "Auditor";
         const { assignment_id, type, photo, latitude, longitude, notes } = req.body;
         if (!assignment_id || !["check_in", "check_out"].includes(type)) {
             return res.status(400).json({ error: "Data tidak lengkap" });
@@ -951,14 +989,22 @@ async function startServer() {
         if (!photo) {
             return res.status(400).json({ error: "Foto bukti wajib disertakan" });
         }
-        const assignment = await db.prepare(`
-      SELECT aa.id, aa.pt_id, p.nama_pt
-      FROM audit_assignments aa
-      JOIN pts p ON aa.pt_id = p.id
-      WHERE aa.id = ? AND aa.auditor_id = ? AND aa.status = 'Active'
-    `).get(assignment_id, currentUser.id);
+        // Auditor: must own the assignment; Supervisor/Manager: just verify assignment is Active
+        const assignment = isAuditorRole
+            ? await db.prepare(`
+          SELECT aa.id, aa.pt_id, p.nama_pt
+          FROM audit_assignments aa
+          JOIN pts p ON aa.pt_id = p.id
+          WHERE aa.id = ? AND aa.auditor_id = ? AND aa.status = 'Active'
+        `).get(assignment_id, currentUser.id)
+            : await db.prepare(`
+          SELECT aa.id, aa.pt_id, p.nama_pt
+          FROM audit_assignments aa
+          JOIN pts p ON aa.pt_id = p.id
+          WHERE aa.id = ? AND aa.status = 'Active'
+        `).get(assignment_id);
         if (!assignment) {
-            return res.status(403).json({ error: "Assignment tidak valid atau bukan milik Anda" });
+            return res.status(403).json({ error: "Assignment tidak valid" });
         }
         const result = await db.prepare(`
       INSERT INTO visit_logs (assignment_id, auditor_id, pt_id, type, photo, latitude, longitude, notes)
@@ -998,10 +1044,10 @@ async function startServer() {
         const isSelf = String(currentUser.id) === String(req.params.id);
         if (!isAdmin && !isSelf)
             return res.status(403).json({ error: "Tidak diizinkan" });
-        const profile = await db.prepare("SELECT id, full_name, email, email_reminder FROM users WHERE id = ?").get(req.params.id);
+        const profile = await db.prepare("SELECT id, full_name, email, email_reminder, phone, wa_reminder FROM users WHERE id = ?").get(req.params.id);
         if (!profile)
             return res.status(404).json({ error: "User tidak ditemukan" });
-        res.json({ ...profile, email_reminder: profile.email_reminder !== 0 });
+        res.json({ ...profile, email_reminder: profile.email_reminder !== 0, wa_reminder: profile.wa_reminder !== 0 });
     });
     app.patch("/api/users/:id/profile", requireAuth, async (req, res) => {
         const currentUser = req.currentUser;
@@ -1010,13 +1056,17 @@ async function startServer() {
         const isSelf = String(currentUser.id) === String(req.params.id);
         if (!isAdmin && !isSelf)
             return res.status(403).json({ error: "Tidak diizinkan" });
-        const { full_name, email, email_reminder } = req.body;
+        const { full_name, email, email_reminder, phone, wa_reminder } = req.body;
         if (full_name !== undefined)
             await db.prepare("UPDATE users SET full_name=? WHERE id=?").run(full_name, req.params.id);
         if (email !== undefined)
             await db.prepare("UPDATE users SET email=? WHERE id=?").run(email, req.params.id);
         if (email_reminder !== undefined)
             await db.prepare("UPDATE users SET email_reminder=? WHERE id=?").run(email_reminder ? 1 : 0, req.params.id);
+        if (phone !== undefined)
+            await db.prepare("UPDATE users SET phone=? WHERE id=?").run(phone || null, req.params.id);
+        if (wa_reminder !== undefined)
+            await db.prepare("UPDATE users SET wa_reminder=? WHERE id=?").run(wa_reminder ? 1 : 0, req.params.id);
         res.json({ success: true });
     });
     // ─── PROTECTED: Notifications ─────────────────────────────────────────────
@@ -1044,7 +1094,8 @@ async function startServer() {
         res.json(config);
     });
     app.patch("/api/config", requireAuth, requireRole("Admin"), async (req, res) => {
-        const allowed = ["smtp_host", "smtp_port", "smtp_secure", "smtp_user", "smtp_pass", "smtp_from", "reminder_time"];
+        const allowed = ["smtp_host", "smtp_port", "smtp_secure", "smtp_user", "smtp_pass", "smtp_from", "reminder_time", "fonnte_token", "email_reminder_time", "wa_reminder_time"];
+        let cronChanged = false;
         for (const [k, v] of Object.entries(req.body)) {
             if (!allowed.includes(k))
                 continue;
@@ -1052,8 +1103,24 @@ async function startServer() {
         INSERT INTO system_config (\`key\`, value) VALUES (?,?)
         ON DUPLICATE KEY UPDATE value=VALUES(value)
       `).run(k, v);
+            if (k === 'email_reminder_time' || k === 'wa_reminder_time')
+                cronChanged = true;
         }
+        if (cronChanged)
+            await rescheduleJobs();
         res.json({ success: true });
+    });
+    app.post("/api/config/test-wa", requireAuth, requireRole("Admin"), async (req, res) => {
+        const { to } = req.body;
+        if (!to)
+            return res.status(400).json({ error: "Nomor WhatsApp tujuan wajib diisi" });
+        try {
+            await sendWhatsApp(to, `✅ Test WhatsApp dari MONITRA berhasil!\nDikirim pada ${new Date().toLocaleString("id-ID")}`);
+            res.json({ success: true });
+        }
+        catch (err) {
+            res.status(500).json({ error: err.message });
+        }
     });
     app.post("/api/config/test-email", requireAuth, requireRole("Admin"), async (req, res) => {
         const { to } = req.body;
@@ -1136,39 +1203,85 @@ async function startServer() {
             },
         });
     }
-    // ─── CRON: Pengingat Laporan Harian (jam 16:00 Senin–Jumat) ──────────────
-    cron.schedule("0 16 * * 1-5", async () => {
-        const today = new Date().toISOString().split("T")[0];
-        const auditors = await db.prepare(`
-      SELECT DISTINCT u.id, u.full_name, u.email, u.email_reminder,
-             GROUP_CONCAT(DISTINCT p.nama_pt) as pt_list
-      FROM users u
-      JOIN audit_assignments aa ON aa.auditor_id = u.id
-      JOIN pts p ON aa.pt_id = p.id
-      JOIN roles r ON u.role_id = r.id
-      WHERE r.name = 'Auditor'
-        AND aa.status = 'Active'
-        AND p.archived_at IS NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM daily_reports dr
-          WHERE dr.assignment_id = aa.id AND dr.tanggal = ?
-        )
-      GROUP BY u.id
-    `).all(today);
-        for (const aud of auditors) {
-            await createNotif(aud.id, "REMINDER", "⏰ Pengingat Laporan Harian", `Anda belum mengisi laporan hari ini untuk: ${aud.pt_list}`);
-            if (aud.email && aud.email_reminder !== 0) {
+    // ─── CRON: Jadwal Pengingat (dinamis, bisa diubah dari admin settings) ──────
+    async function rescheduleJobs() {
+        const getC = async (k, def) => (await db.prepare("SELECT value FROM system_config WHERE `key`=?").get(k))?.value ?? def;
+        const emailTime = await getC('email_reminder_time', '16:00');
+        const waTime = await getC('wa_reminder_time', '16:30');
+        if (emailCronTask) { emailCronTask.destroy(); emailCronTask = null; }
+        if (waCronTask) { waCronTask.destroy(); waCronTask = null; }
+        // WA reminder
+        waCronTask = cron.schedule(timeToCron(waTime), async () => {
+            const today = new Date().toISOString().split("T")[0];
+            const auditors = await db.prepare(`
+        SELECT DISTINCT u.id, u.full_name, u.phone, u.wa_reminder,
+               GROUP_CONCAT(DISTINCT p.nama_pt) as pt_list
+        FROM users u
+        JOIN audit_assignments aa ON aa.auditor_id = u.id
+        JOIN pts p ON aa.pt_id = p.id
+        JOIN roles r ON u.role_id = r.id
+        WHERE r.name = 'Auditor'
+          AND aa.status = 'Active'
+          AND p.archived_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM daily_reports dr
+            WHERE dr.assignment_id = aa.id AND dr.tanggal = ?
+          )
+        GROUP BY u.id
+      `).all(today);
+            let sent = 0;
+            for (const aud of auditors) {
+                if (!aud.phone || aud.wa_reminder === 0)
+                    continue;
                 try {
-                    await sendEmail(aud.email, "🔔 Pengingat: Laporan Harian Belum Diisi — MONITRA", emailReminderTemplate(aud.full_name, aud.pt_list, today));
-                    console.log(`[MONITRA] Reminder email → ${aud.email}`);
+                    const ptLines = (aud.pt_list || '').split(',').map((p) => `• ${p.trim()}`).join('\n');
+                    const msg = `⏰ *Pengingat MONITRA*\n\nHalo *${aud.full_name}*,\n\nAnda belum mengisi laporan harian hari ini untuk:\n${ptLines}\n\nSilakan buka MONITRA dan isi laporan sebelum hari berakhir.\n\n_Dikirim otomatis oleh sistem MONITRA_`;
+                    await sendWhatsApp(aud.phone, msg);
+                    sent++;
+                    console.log(`[WA] Reminder terkirim → ${aud.phone} (${aud.full_name})`);
                 }
                 catch (err) {
-                    console.error(`[MONITRA] Gagal kirim email ke ${aud.email}: ${err.message}`);
+                    console.error(`[WA] Gagal kirim ke ${aud.phone}: ${err.message}`);
                 }
             }
-        }
-        console.log(`[MONITRA] Daily reminder selesai: ${auditors.length} auditor belum laporan`);
-    }, { timezone: "Asia/Jakarta" });
+            console.log(`[WA] Daily WA reminder selesai: ${sent}/${auditors.length} terkirim`);
+        }, { timezone: "Asia/Jakarta" });
+        // Email + notif reminder
+        emailCronTask = cron.schedule(timeToCron(emailTime), async () => {
+            const today = new Date().toISOString().split("T")[0];
+            const auditors = await db.prepare(`
+        SELECT DISTINCT u.id, u.full_name, u.email, u.email_reminder,
+               GROUP_CONCAT(DISTINCT p.nama_pt) as pt_list
+        FROM users u
+        JOIN audit_assignments aa ON aa.auditor_id = u.id
+        JOIN pts p ON aa.pt_id = p.id
+        JOIN roles r ON u.role_id = r.id
+        WHERE r.name = 'Auditor'
+          AND aa.status = 'Active'
+          AND p.archived_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM daily_reports dr
+            WHERE dr.assignment_id = aa.id AND dr.tanggal = ?
+          )
+        GROUP BY u.id
+      `).all(today);
+            for (const aud of auditors) {
+                await createNotif(aud.id, "REMINDER", "⏰ Pengingat Laporan Harian", `Anda belum mengisi laporan hari ini untuk: ${aud.pt_list}`);
+                if (aud.email && aud.email_reminder !== 0) {
+                    try {
+                        await sendEmail(aud.email, "🔔 Pengingat: Laporan Harian Belum Diisi — MONITRA", emailReminderTemplate(aud.full_name, aud.pt_list, today));
+                        console.log(`[MONITRA] Reminder email → ${aud.email}`);
+                    }
+                    catch (err) {
+                        console.error(`[MONITRA] Gagal kirim email ke ${aud.email}: ${err.message}`);
+                    }
+                }
+            }
+            console.log(`[MONITRA] Daily reminder selesai: ${auditors.length} auditor belum laporan`);
+        }, { timezone: "Asia/Jakarta" });
+        console.log(`[CRON] Jadwal dikonfigurasi: Email=${emailTime}, WA=${waTime}`);
+    }
+    await rescheduleJobs();
 }
 // Initialize DB then start server
 initDb()
